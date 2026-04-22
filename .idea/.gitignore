@@ -1,0 +1,7 @@
+# 默认忽略的文件
+/shelf/
+/workspace.xml
+/app/build/
+# 其他需要忽略的文件
+/.idea/
+
