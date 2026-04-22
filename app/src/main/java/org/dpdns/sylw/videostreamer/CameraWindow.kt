@@ -126,15 +126,16 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             cameraManager?.closeCamera()
             isCameraReady = false
         } else {
-            // 启动摄像头（权限已在 LaunchedEffect 中检查）
+            // 启动摄像头前检查权限
             selectedCameraId?.let { cameraId ->
-                val (width, height) = selectedResolution.split("x").map { it.toInt() }
-//                android.util.Log.d("CameraWindow", "Starting camera: $cameraId, ${width}x${height}, ${selectedFrameRate}fps")
-                // 安全检查：确保有权限
+                // 🔥 关键修复：在启动摄像头时才请求权限
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    val (width, height) = selectedResolution.split("x").map { it.toInt() }
+//                    android.util.Log.d("CameraWindow", "Starting camera: $cameraId, ${width}x${height}, ${selectedFrameRate}fps")
                     cameraManager?.openCamera(cameraId, width, height, selectedFrameRate, videoBitrate)
                 } else {
-                    errorMessage = "摄像头权限未授予"
+                    // 请求权限
+                    permissionLauncher.launch(Manifest.permission.CAMERA)
                 }
             }
         }
@@ -192,12 +193,8 @@ fun CameraWindow(modifier: Modifier = Modifier) {
 
     // 初始化
     LaunchedEffect(Unit) {
-        // 检查摄像头权限
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            initCameraManager()
-        } else {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
-        }
+        // 🔥 仅初始化 Camera 管理器并获取摄像头列表（不需要权限）
+        initCameraManager()
         
         // 加载全局码率配置
         videoBitrate = loadBitrate(context)
@@ -241,42 +238,6 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // 顶部：标题和状态
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
-                    text = "Camera Streaming",
-                    style = MaterialTheme.typography.headlineMedium,
-                )
-                
-                Spacer(modifier = Modifier.height(8.dp))
-                
-                // 状态指示
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(12.dp)
-                            .background(
-                                if (isStreaming) Color.Green else Color.Gray,
-                                shape = androidx.compose.foundation.shape.CircleShape
-                            )
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (isStreaming) "推流中" else if (isCameraReady) "摄像头就绪" else "未启动",
-                    )
-                }
-                
-                // 错误信息
-                errorMessage?.let { error ->
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = error,
-                        color = Color.Red,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-            }
-            
             // 中间：配置信息
             Column(
                 horizontalAlignment = Alignment.Start,
@@ -290,27 +251,27 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 Spacer(modifier = Modifier.height(8.dp))
                 
                 Text(
-                    text = "📷 ${availableCameras.find { it.cameraId == selectedCameraId }?.displayName ?: "未选择"}",
+                    text = availableCameras.find { it.cameraId == selectedCameraId }?.displayName ?: "未选择",
                 )
                 Text(
-                    text = "📐 $selectedResolution @ ${selectedFrameRate}fps",
+                    text = "$selectedResolution @ ${selectedFrameRate}fps",
                 )
                 Text(
-                    text = "🎬 码率: ${videoBitrate / 1000} kbps",
+                    text = "码率: ${videoBitrate / 1000} kbps",
                 )
                 Text(
-                    text = "🔇 无音频",
+                    text = "无音频",
                 )
                 
                 if (isStreaming) {
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = "⚠️ 请保持此页面开启",
+                        text = "请保持此页面开启",
                         color = Color.Yellow,
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        text = "💡 2分钟后将自动黑屏省电",
+                        text = "2分钟后将自动黑屏省电",
                         color = Color.Gray,
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -333,7 +294,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                             value = availableCameras.find { it.cameraId == selectedCameraId }?.displayName ?: "选择摄像头",
                             onValueChange = {},
                             readOnly = true,
-                            label = { Text("📷 摄像头") },
+                            label = { Text("摄像头") },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = cameraMenuExpanded) },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -368,7 +329,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                                 value = selectedResolution,
                                 onValueChange = {},
                                 readOnly = true,
-                                label = { Text("📐 分辨率") },
+                                label = { Text("分辨率") },
                                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = resolutionMenuExpanded) },
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -404,7 +365,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                             value = "$selectedFrameRate fps",
                             onValueChange = {},
                             readOnly = true,
-                            label = { Text("🎬 帧率") },
+                            label = { Text("帧率") },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = frameRateMenuExpanded) },
                             modifier = Modifier
                                 .fillMaxWidth()

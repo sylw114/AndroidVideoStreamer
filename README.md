@@ -64,7 +64,6 @@ nms.on('donePublish', (id, StreamPath, args) => {
 
 ## 已知问题
 1. 屏幕录制下帧率设置可能不生效
-2. 过早申请摄像头权限
 
 ## 声明
 本项目主要由AI编写，代码质量可能存在问题 ~~250 warnings~~ ，如有大佬发现问题，请提issue，万分感谢。
