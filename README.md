@@ -1,12 +1,13 @@
 # VideoStreamer
 
-VideoStreamer 是一个专为 Android 设备设计的视频流媒体应用，旨在提供高质量、低延迟的屏幕镜像和流媒体体验。通过利用现代 Android API 和高效的编码技术，VideoStreamer 允许用户将设备屏幕实时流式传输到其他设备或平台，如电脑、电视等。
+VideoStreamer 是一个专为 Android 设备设计的视频流媒体应用，旨在提供高质量的屏幕镜像和流媒体体验。
 
 ## 主要特性
 
 - **实时屏幕镜像**：无缝地将 Android 设备屏幕镜像到其他设备。
 - **高分辨率支持**：默认原生分辨率
 - **易于集成**：兼容 OBS 等流媒体软件，便于直播和录制。
+- **支持的输入**： 屏幕捕获，摄像头录制
 
 ## 为什么不选择 scrcpy
 
@@ -60,3 +61,10 @@ nms.on('donePublish', (id, StreamPath, args) => {
 ```
 
 而后，在OBS中添加媒体源，链接填入对应的流链接。例如，设备推流为rtmp://<serverIP>/device/stream ，OBS中添加媒体源为rtmp://<serverIP>/device/stream
+
+## 已知问题
+1. 屏幕录制下帧率设置可能不生效
+2. 过早申请摄像头权限
+
+## 声明
+本项目主要由AI编写，代码质量可能存在问题，如有大佬发现问题，请提issue，万分感谢。
