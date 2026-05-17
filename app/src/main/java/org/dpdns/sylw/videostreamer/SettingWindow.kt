@@ -15,7 +15,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -40,9 +39,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
-import org.dpdns.sylw.videostreamer.streaming.StreamManager
 
-var streaming: StreamManager? = null
 val Context.dataStore by preferencesDataStore("settings")
 private val PREF_STREAM_URL = stringPreferencesKey("stream_url")
 private val PREF_VIDEO_BITRATE = intPreferencesKey("video_bitrate")
@@ -54,17 +51,32 @@ private val PREF_STREAMING_PROTOCOL = stringPreferencesKey("streaming_protocol")
  */
 object StreamConfig {
     private var _currentUrl: String? = null
-    
+    private var _videoBitrate: Int? = null
+    private var _frameRate: Int? = null
+    private var _streamingProtocol: String? = null
+
     /**
      * 获取当前推流 URL（从内存缓存读取）
      */
     fun getCurrentUrl(): String? = _currentUrl
-    
+
     /**
      * 设置当前推流 URL（更新内存缓存）
      */
     fun setCurrentUrl(url: String?) {
         _currentUrl = url
+    }
+    fun getVideoBitrate(): Int? = _videoBitrate
+    fun setVideoBitrate(bitrate: Int?) {
+        _videoBitrate = bitrate
+    }
+    fun getFrameRate(): Int? = _frameRate
+    fun setFrameRate(frameRate: Int?) {
+        _frameRate = frameRate
+    }
+    fun getStreamingProtocol(): String? = _streamingProtocol
+    fun setStreamingProtocol(protocol: String?) {
+        _streamingProtocol = protocol
     }
 }
 
@@ -145,19 +157,22 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         if (savedUrl != null) {
             url = savedUrl
         }
-        
+        StreamConfig.setCurrentUrl(savedUrl)
+
         val savedBitrate = loadBitrate(context)
+        StreamConfig.setVideoBitrate(savedBitrate)
         bitrateKbps = savedBitrate / 1024
         bitrateInput = bitrateKbps.toString()
         val savedFrameRate = loadFrameRate(context)
+        StreamConfig.setFrameRate(savedFrameRate)
         frameRate = savedFrameRate
         
         val savedProtocol = loadProtocol(context)
+        StreamConfig.setStreamingProtocol(savedProtocol)
         selectedProtocol = savedProtocol
     }
 
     fun onSaveUrl() {
-        streaming?.switchUrl(url)
         scope.launch {
             saveUrl(context, url)
         }
@@ -167,24 +182,18 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         val bitrate = bitrateKbps * 1024
         scope.launch {
             saveBitrate(context, bitrate)
-            // 🔥 关键修复：立即更新到 StreamManager
-            streaming?.updateBitrate(bitrate)
         }
     }
     
     fun onSaveFrameRate() {
         scope.launch {
             saveFrameRate(context, frameRate)
-            // 🔥 关键修复：立即更新到 StreamManager
-            streaming?.updateFrameRate(frameRate)
         }
     }
     
     fun onSaveProtocol() {
         scope.launch {
             saveProtocol(context, selectedProtocol)
-            // 🔥 切换协议（如果正在推流，需要重启）
-            streaming?.switchProtocol(selectedProtocol)
         }
     }
     Column(

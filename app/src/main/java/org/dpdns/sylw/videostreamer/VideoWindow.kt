@@ -43,14 +43,14 @@ fun VideoWindow(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
-    
+
     // 推流管理器
     var streamManager by remember { mutableStateOf<StreamManager?>(null) }
     var isStreaming by remember { mutableStateOf(false) }
-    
+
     // 从全局配置读取推流 URL（使用可变状态）
     var currentRtmpUrl by remember { mutableStateOf<String?>(null) }
-    
+
     var mediaProjectionService: MediaProjectionService.LocalBinder? by remember {
         mutableStateOf(
             null
@@ -72,11 +72,11 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     val screenSize = binder.getScreenRealSize()
                     val actualWidth = screenSize.x
                     val actualHeight = screenSize.y
-                    
+
                     // 直接使用物理分辨率，不根据方向交换
                     // VirtualDisplay 会自动处理方向
 //                    android.util.Log.d("VideoWindow", "onServiceConnected: ${actualWidth}x${actualHeight}")
-                    
+
                     if (actualWidth > 0 && actualHeight > 0) {
                         try {
                             surfaceTexture.setDefaultBufferSize(actualWidth, actualHeight)
@@ -126,7 +126,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 e.printStackTrace()
             }
         } else {
-//            android.util.Log.w("VideoWindow", "Screen capture authorization failed or cancelled")
+//            android.util.Log.w("VideoWindow", "Screen capture authorization failed or canceled")
         }
     }
 
@@ -143,59 +143,56 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             textureView = null
         }
     }
-    
+
     // 初始化推流管理器并从配置加载参数
     DisposableEffect(Unit) {
         val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
-        
+
         // 🔥 关键修复：设置全局 streaming 引用，让 SettingWindow 可以访问
         streamManager = StreamManager(context as Activity).apply {
-            streaming = this
-            
             onStreamingStateChanged = { streaming ->
                 isStreaming = streaming
 //                android.util.Log.d("VideoWindow", "Streaming state changed: $streaming")
             }
-            
+
             onError = { error ->
 //                android.util.Log.e("VideoWindow", "Stream error: $error")
             }
         }
-        
+
         // 异步加载保存的配置并初始化协议
-        scope.launch {
-            val savedUrl = loadUrl(context)
-            StreamConfig.setCurrentUrl(savedUrl)
-            currentRtmpUrl = savedUrl  // 更新本地状态
+
+        val savedUrl = StreamConfig.getCurrentUrl()!!
+        currentRtmpUrl = savedUrl  // 更新本地状态
 //            android.util.Log.d("VideoWindow", "Loaded saved RTMP URL: $savedUrl")
-            
-            val savedBitrate = loadBitrate(context)
+
+        val savedBitrate = StreamConfig.getVideoBitrate()!!
 //            android.util.Log.d("VideoWindow", "Loaded saved bitrate: $savedBitrate")
-            
-            val savedFrameRate = loadFrameRate(context)
+
+        val savedFrameRate = StreamConfig.getFrameRate()!!
 //            android.util.Log.d("VideoWindow", "Loaded saved frame rate: $savedFrameRate")
-            
-            val savedProtocol = loadProtocol(context)
+
+        val savedProtocol = StreamConfig.getStreamingProtocol()!!
 //            android.util.Log.d("VideoWindow", "Loaded saved protocol: $savedProtocol")
-            
-            // 初始化协议（使用保存的协议）
-            streamManager?.init(savedProtocol)
-            
-            // 设置帧率到 StreamManager
-            streamManager?.setVideoParams(
-                width = 1920,  // 默认宽度，后续会根据屏幕方向调整
-                height = 1080, // 默认高度
-                bitrate = savedBitrate,
-                frameRate = savedFrameRate
-            )
-        }
-        
+
+        // 初始化协议（使用保存的协议）
+        streamManager?.init(savedProtocol)
+
+        // 设置帧率到 StreamManager
+        streamManager?.setVideoParams(
+            width = 1920,  // 默认宽度，后续会根据屏幕方向调整
+            height = 1080, // 默认高度
+            bitrate = savedBitrate,
+            frameRate = savedFrameRate
+        )
+
+
         onDispose {
             streamManager?.release()
             streamManager = null
         }
     }
-    
+
     // 当绑定到 Service 时，设置外部音频源和 MediaProjection
     LaunchedEffect(mediaProjectionService) {
         mediaProjectionService?.let { binder ->
@@ -207,14 +204,14 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             } else {
 //                android.util.Log.e("VideoWindow", "MediaProjection is null in Service!")
             }
-            
+
             // 2. 将 StreamManager 的旋转回调注册到 MediaProjectionService
             binder.onScreenRotation = { newWidth, newHeight ->
 //                android.util.Log.d("MediaProj", "Screen rotation detected: ${newWidth}x${newHeight}")
                 // 直接调用 StreamManager 的 updateResolution
                 streamManager?.updateResolution(newWidth, newHeight)
             }
-            
+
             // 🔥 注册 MediaProjection 停止回调（系统终止权限时自动停止推流）
             binder.onMediaProjectionStopped = {
 //                android.util.Log.w("VideoWindow", "⚠️ MediaProjection stopped by system!")
@@ -223,7 +220,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 // isStreaming 会通过 StateFlow 自动更新 UI
             }
 //            android.util.Log.d("VideoWindow", "Screen rotation callback registered in Service")
-            
+
             // 3. 设置外部 PCM 音频源（从 MediaProjectionService 获取）
             // 🔥 性能优化：使用 getAudioDataInto() + 预分配缓冲区，减少 GC
             val pcmReadBuffer = ByteArray(15360) // 预分配缓冲区
@@ -236,15 +233,15 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 }
             }
 //            android.util.Log.d("AudioCapture", "External audio source set from MediaProjectionService (optimized)")
-            
+
             // 4. 设置 MediaProjectionService binder 到 StreamManager（供协议层使用）
             streamManager?.setMediaProjectionServiceBinder(binder)
 //            android.util.Log.d("VideoWindow", "MediaProjectionService binder configured in StreamManager")
         }
     }
-    
+
     // 屏幕旋转现在由 MediaProjectionService 在后台持续监听，不需要在前台检测
-    
+
     // 🔥 关键修复：页面恢复时重新绑定服务（从设置页返回时）
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
@@ -260,7 +257,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             }
         }
     }
-    
+
     // 当已授权时，自动绑定服务
     DisposableEffect(isAuthorized) {
         if (isAuthorized && mediaProjectionService == null) {
@@ -322,11 +319,11 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                             val screenSize = binder.getScreenRealSize()
                             val actualWidth = screenSize.x
                             val actualHeight = screenSize.y
-                            
+
                             // 获取保存的码率
                             scope.launch {
                                 val savedBitrate = loadBitrate(context)
-                                
+
 //                                android.util.Log.d("VideoWindow", "=== 开始配置 ===")
 //                                android.util.Log.d("VideoWindow", "binder: ${if (binder == null) "null" else "valid"}")
 //                                android.util.Log.d("VideoWindow", "streamManager: ${if (streamManager == null) "null" else "valid"}")
@@ -335,7 +332,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                 val screenSize = binder.getScreenRealSize()
                                 val actualWidth = screenSize.x
                                 val actualHeight = screenSize.y
-                                
+
 //                                android.util.Log.d("VideoWindow", "推流分辨率：${actualWidth}x${actualHeight}")
 //                                android.util.Log.d("VideoWindow", "码率：$savedBitrate bps")
 //                                android.util.Log.d("VideoWindow", "=== 配置结束 ===")
@@ -348,7 +345,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                     frameRate = 30,
                                     iFrameInterval = 5
                                 )
-                                
+
 //                                android.util.Log.d("VideoWindow", "准备调用 toggleStreaming(true)")
                                 // 开始录制
                                 binder.toggleStreaming(true)
@@ -380,38 +377,38 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                             // 开始推流
                             val rtmpUrl = currentRtmpUrl
                             if (!rtmpUrl.isNullOrEmpty()) {
-                                
+
                                 // 获取实际屏幕分辨率（物理尺寸）
                                 mediaProjectionService?.let { binder ->
                                     val screenSize = binder.getScreenRealSize()
                                     val actualWidth = screenSize.x
                                     val actualHeight = screenSize.y
-                                    
+
 //                                    android.util.Log.d("VideoWindow", "推流分辨率：${actualWidth}x${actualHeight}")
 //                                    android.util.Log.d("VideoWindow", "=== 配置结束 ===")
-                                    
+
                                     // 在后台线程启动推流，避免 NetworkOnMainThreadException
                                     kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                                         try {
                                             // 加载保存的码率和帧率
                                             val savedBitrate = loadBitrate(context)
                                             val savedFrameRate = loadFrameRate(context)
-                                            
+
                                             // 使用 MediaProjectionService 的实际分辨率
                                             val screenSize = binder.getScreenRealSize()
                                             val actualWidth = screenSize.x
                                             val actualHeight = screenSize.y
 //                                            android.util.Log.d("VideoWindow", "Starting RTMP streaming: ${actualWidth}x${actualHeight}, bitrate=$savedBitrate, fps=$savedFrameRate to: $rtmpUrl")
-                                
-                                // 设置视频参数（使用实际分辨率和保存的帧率）
-                                manager.setVideoParams(
-                                    width = actualWidth,
-                                    height = actualHeight,
-                                    bitrate = savedBitrate,
-                                    frameRate = savedFrameRate,
-                                    iFrameInterval = 5
-                                )
-                                            
+
+                                            // 设置视频参数（使用实际分辨率和保存的帧率）
+                                            manager.setVideoParams(
+                                                width = actualWidth,
+                                                height = actualHeight,
+                                                bitrate = savedBitrate,
+                                                frameRate = savedFrameRate,
+                                                iFrameInterval = 5
+                                            )
+
                                             manager.startStreaming(rtmpUrl)
 //                                            android.util.Log.d("VideoWindow", "Started streaming to: $rtmpUrl")
                                         } catch (e: Exception) {

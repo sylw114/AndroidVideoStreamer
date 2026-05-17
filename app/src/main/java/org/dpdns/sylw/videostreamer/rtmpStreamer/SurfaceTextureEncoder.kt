@@ -354,6 +354,7 @@ class SurfaceTextureEncoder(
             // 创建 MediaFormat
             val format = MediaFormat.createVideoFormat(VIDEO_MIME_TYPE, width, height).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, videoBitrate)
+                setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, frameRate.toFloat())
                 setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, 
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)

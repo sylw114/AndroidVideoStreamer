@@ -374,7 +374,7 @@ class RtmpPusher {
             
             // ECMA Array format:
             // Type marker (0x08) + count (4 bytes) + properties + end marker
-            val propertyCount = 11 // width, height, videocodecid, videodatarate, framerate, duration, encoder, audiocodecid, audiodatarate, audiosamplerate, audiosamplesize
+            val propertyCount = 12 // width, height, videocodecid, videodatarate, framerate, fps, duration, encoder, audiocodecid, audiodatarate, audiosamplerate, audiosamplesize
 
             put(0x08.toByte()) // ECMA Array type marker
             putInt(propertyCount) // Number of elements in associative array
@@ -385,6 +385,7 @@ class RtmpPusher {
             putProperty("videocodecid", 7.0) // H.264
             putProperty("videodatarate", videoBitrate / 1024.0)
             putProperty("framerate", frameRate.toDouble())
+            putProperty("fps", frameRate.toDouble())
             putProperty("duration", 0.0) // Live stream
             putProperty("encoder", "Android MediaCodec")
             
@@ -426,7 +427,7 @@ class RtmpPusher {
             // 🔥 关键修复：必须添加 Transaction ID = 0
             putAmfNumber(0.0)
             
-            val propertyCount = 11 // width, height, videocodecid, videodatarate, framerate, duration, encoder, audiocodecid, audiodatarate, audiosamplerate, audiosamplesize
+            val propertyCount = 12 // width, height, videocodecid, videodatarate, framerate, fps, duration, encoder, audiocodecid, audiodatarate, audiosamplerate, audiosamplesize
             
             put(0x08.toByte())
             putInt(propertyCount)
@@ -436,6 +437,7 @@ class RtmpPusher {
             putProperty("videocodecid", 7.0) // H.264
             putProperty("videodatarate", videoBitrate / 1024.0)
             putProperty("framerate", frameRate.toDouble())
+            putProperty("fps", frameRate.toDouble())
             putProperty("duration", 0.0)
             putProperty("encoder", "Android MediaCodec")
             

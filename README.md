@@ -62,8 +62,5 @@ nms.on('donePublish', (id, StreamPath, args) => {
 
 而后，在OBS中添加媒体源，链接填入对应的流链接。例如，设备推流为rtmp://<serverIP>/device/stream ，OBS中添加媒体源为rtmp://<serverIP>/device/stream
 
-## 已知问题
-1. 屏幕录制下帧率设置可能不生效
-
 ## 声明
 本项目主要由AI编写，代码质量可能存在问题 ~~250 warnings~~ ，如有大佬发现问题，请提issue，万分感谢。
