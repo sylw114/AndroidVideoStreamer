@@ -571,9 +571,15 @@ class RtmpPusher {
         val payload: ByteArray
     )
     
-    private val packetQueue = java.util.concurrent.LinkedBlockingQueue<RtmpPacket>(100)
+    private val audioPacketQueue = java.util.concurrent.LinkedBlockingQueue<RtmpPacket>(50)
+    private val videoPacketQueue = java.util.concurrent.LinkedBlockingQueue<RtmpPacket>(50)
     private var sendThread: Thread? = null
     private var isSendThreadRunning = false
+    
+    // 🔥 关键优化：用于视频等待音频的同步机制
+    // 当音频队列为空时，视频线程在此等待，避免忙等待
+    private val audioAvailableLock = Object()
+    private var hasAudioAvailable = false
     
     // 🔥 低延迟优化：跟踪 flush 计数
     private var packetCountSinceFlush = 0
@@ -590,12 +596,52 @@ class RtmpPusher {
             
             while (isSendThreadRunning && !Thread.interrupted()) {
                 try {
-                    // 阻塞等待下一个包（超时100ms以便检查退出标志）
-                    val packet = packetQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS)
-                        ?: continue
+                    // 策略：查看两个队列的队头，选择时间戳更小的那个发送
+                    // 视频帧需要等待对应的音频帧到达，避免音频连发现象
                     
-                    // 在单线程中顺序执行实际的发送逻辑
-                    doSendPacket(packet.csid, packet.msid, packet.ts, packet.type, packet.payload)
+                    var selectedPacket: RtmpPacket? = null
+                    
+                    // 获取两个队列的队头（不取出，只peek）
+                    val audioHead = audioPacketQueue.peek()
+                    val videoHead = videoPacketQueue.peek()
+                    
+                    when {
+                        // 两个队列都有数据，比较时间戳
+                        audioHead != null && videoHead != null -> {
+                            selectedPacket = if (audioHead.ts <= videoHead.ts) {
+                                audioPacketQueue.poll()
+                            } else {
+                                videoPacketQueue.poll()
+                            }
+                        }
+                        // 只有音频队列有数据
+                        audioHead != null -> {
+                            selectedPacket = audioPacketQueue.poll()
+                        }
+                        // 只有视频队列有数据，但音频队列为空
+                        // 说明对应时间段的音频帧还没生产出来，需要等待
+                        videoHead != null && audioHead == null -> {
+                            // 使用 wait/notify 避免忙等待
+                            synchronized(audioAvailableLock) {
+                                hasAudioAvailable = false
+                                // 设置超时，防止永久等待（最多等待100ms）
+                                audioAvailableLock.wait(100)
+                            }
+                            // 唤醒后重新循环检查
+                            continue
+                        }
+                        // 两个队列都为空，短暂休眠
+                        else -> {
+                            Thread.sleep(1)
+                            continue
+                        }
+                    }
+                    
+                    // 发送选中的包
+                    selectedPacket?.let { packet ->
+                        doSendPacket(packet.csid, packet.msid, packet.ts, packet.type, packet.payload)
+                    }
+                    
                 } catch (e: InterruptedException) {
                     break
                 } catch (e: Exception) {
@@ -619,7 +665,8 @@ class RtmpPusher {
         sendThread?.interrupt()
         sendThread?.join(1000)
         sendThread = null
-        packetQueue.clear()
+        audioPacketQueue.clear()
+        videoPacketQueue.clear()
 //        Log.d(TAG, "Send thread stopped")
     }
     
@@ -743,13 +790,39 @@ class RtmpPusher {
             return
         }
         
-        // 发送线程已启动，使用队列异步发送
+        // 发送线程已启动，根据类型分别入队
         val packet = RtmpPacket(csid, msid, ts, type, payload)
-        if (!packetQueue.offer(packet)) {
-            // 队列满，尝试移除最旧的包再插入
-            packetQueue.poll()
-            packetQueue.offer(packet)
-//            Log.w(TAG, "Packet queue full, dropped oldest packet")
+        
+        when (type) {
+            MSG_AUDIO -> {
+                if (!audioPacketQueue.offer(packet)) {
+                    // 音频队列满，丢弃最旧的音频帧
+                    audioPacketQueue.poll()
+                    audioPacketQueue.offer(packet)
+//                    Log.w(TAG, "Audio packet queue full, dropped oldest audio packet")
+                }
+                
+                // 🔥 关键优化：音频帧入队后，通知等待中的视频线程
+                synchronized(audioAvailableLock) {
+                    hasAudioAvailable = true
+                    audioAvailableLock.notifyAll()
+                }
+            }
+            MSG_VIDEO -> {
+                if (!videoPacketQueue.offer(packet)) {
+                    // 视频队列满，丢弃最旧的视频帧
+                    videoPacketQueue.poll()
+                    videoPacketQueue.offer(packet)
+//                    Log.w(TAG, "Video packet queue full, dropped oldest video packet")
+                }
+            }
+            else -> {
+                // 控制消息直接发送到音频队列（高优先级）
+                if (!audioPacketQueue.offer(packet)) {
+                    audioPacketQueue.poll()
+                    audioPacketQueue.offer(packet)
+                }
+            }
         }
     }
 

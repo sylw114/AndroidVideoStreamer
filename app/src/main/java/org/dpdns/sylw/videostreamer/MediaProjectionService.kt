@@ -57,12 +57,17 @@ class MediaProjectionService : Service() {
     
     // 音频数据回调接口，用于将内录音频传递给编码器
     var audioDataCallback: (() -> ByteArray?)? = null
-    // 🔥 环形缓冲区：8 包（约 5 帧 AAC，~270ms），每包 15360 字节
+    
+    // 🔥 全局变量：单个 PCM 包大小（由 AudioRecord.getMinBufferSize 计算得出）
+    private var audioPacketSize: Int = 0
+    
+    // 🔥 环形缓冲区：8 包（约 5 帧 AAC，~270ms），每包大小由 audioPacketSize 决定
     // 容量设计：理论最小 2 包，4 倍预留应对并发抖动（GC、线程调度等）
     // 平衡点：足够应对常见卡顿，同时保持低延迟和快速响应
-    private val audioRingBuffer = LockFreeRingBuffer(capacity = 8, packetSize = 15360)
+    // ⚠️ 注意：audioRingBuffer 需要在 startAudioCapture 中初始化，因为 packetSize 依赖于 AudioRecord 配置
+    private lateinit var audioRingBuffer: LockFreeRingBuffer
     // 复用读取缓冲区，减少 GC
-    private val readBuffer = ByteArray(15360)
+    private lateinit var readBuffer: ByteArray
     
     // 屏幕旋转回调，通知 StreamManager 更新编码器
     var onScreenRotation: ((Int, Int) -> Unit)? = null
@@ -137,6 +142,9 @@ class MediaProjectionService : Service() {
 
         fun stopAudioCapture() = this@MediaProjectionService.stopAudioCapture()
         
+        // 🔥 获取音频包大小（用于外部缓冲区分配）
+        fun getAudioPacketSize(): Int = audioPacketSize
+        
         // 提供给外部获取音频数据的接口 - 使用环形缓冲区
         // 🔥 性能优化：提供直接读取到目标缓冲区的方法，避免 copyOf
         fun getAudioDataInto(targetBuffer: ByteArray, outTimestamp: LongArray? = null): Int {
@@ -145,13 +153,14 @@ class MediaProjectionService : Service() {
             
         // 🔥 性能优化：使用对象池减少 ByteArray 分配
         private val audioDataPool = ArrayDeque<ByteArray>(4).apply {
-            repeat(4) { addLast(ByteArray(15360)) }
+            repeat(4) { addLast(ByteArray(audioPacketSize.takeIf { it > 0 } ?: 15360)) }
         }
             
         // 🔥 回收音频数据缓冲区到对象池
         fun recycleAudioData(buffer: ByteArray) {
             synchronized(audioDataPool) {
-                if (audioDataPool.size < 4 && buffer.size >= 15360) {
+                val expectedSize = audioPacketSize.takeIf { it > 0 } ?: 15360
+                if (audioDataPool.size < 4 && buffer.size >= expectedSize) {
                     audioDataPool.addLast(buffer)
                 }
             }
@@ -423,9 +432,14 @@ class MediaProjectionService : Service() {
             return
         }
         
-        val bufferSize = minBufferSize * 2
+        // 🔥 关键修复：将 bufferSize 保存为全局变量，作为单个 PCM 包大小
+        audioPacketSize = minBufferSize
 //        android.util.Log.d("AudioCapture", "📊 Audio config: ${sampleRate}Hz, stereo, 16-bit")
-//        android.util.Log.d("AudioCapture", "   Min buffer: $minBufferSize, Using buffer: $bufferSize bytes")
+//        android.util.Log.d("AudioCapture", "   Min buffer: $minBufferSize, Using buffer: $audioPacketSize bytes")
+        
+        // 🔥 初始化环形缓冲区和读取缓冲区（使用全局的 audioPacketSize）
+        audioRingBuffer = LockFreeRingBuffer(capacity = 16, packetSize = audioPacketSize)
+        readBuffer = ByteArray(audioPacketSize)
 
         try {
             audioRecord = AudioRecord.Builder()
@@ -436,7 +450,7 @@ class MediaProjectionService : Service() {
                         .setChannelMask(channelConfig)
                         .build()
                 )
-                .setBufferSizeInBytes(bufferSize)
+                .setBufferSizeInBytes(audioPacketSize)
                 .setAudioPlaybackCaptureConfig(config!!)
                 .build()
 
@@ -454,13 +468,13 @@ class MediaProjectionService : Service() {
 //            android.util.Log.d("AudioCapture", "   Sample rate: ${sampleRate}Hz")
 //            android.util.Log.d("AudioCapture", "   Channel config: $channelConfig")
 //            android.util.Log.d("AudioCapture", "   Audio format: $audioFormat")
-//            android.util.Log.d("AudioCapture", "   Buffer size: $bufferSize bytes")
+//            android.util.Log.d("AudioCapture", "   Buffer size: $audioPacketSize bytes")
 //            android.util.Log.d("AudioCapture", "   AudioRecord state: ${audioRecord?.state}")
 //            android.util.Log.d("AudioCapture", "   AudioRecord recording state: ${audioRecord?.recordingState}")
 //            android.util.Log.d("AudioCapture", "========================================")
         
             audioThread = Thread({
-                val data = ByteArray(bufferSize)
+                val data = ByteArray(audioPacketSize)
 //                android.util.Log.e("AudioCapture", "🎤 [THREAD] AudioCaptureThread STARTED")
                 var readCount = 0
                 var emptyReadCount = 0
@@ -475,7 +489,7 @@ class MediaProjectionService : Service() {
                             break
                         }
                         
-                        val read = audioRecord?.read(data, 0, bufferSize) ?: 0
+                        val read = audioRecord?.read(data, 0, audioPacketSize) ?: 0
                         
                         when {
                             read > 0 -> {
@@ -540,8 +554,13 @@ class MediaProjectionService : Service() {
         audioRecord = null
         
         // 🔥 关键修复：清空音频环形缓冲区，防止旧数据累积导致音画不同步
-        audioRingBuffer.clear()
-//        android.util.Log.d("AudioCapture", "🔍 Audio ring buffer cleared")
+        if (::audioRingBuffer.isInitialized) {
+            audioRingBuffer.clear()
+//            android.util.Log.d("AudioCapture", "🔍 Audio ring buffer cleared")
+        }
+        
+        // 🔥 重置初始化状态（下次 startAudioCapture 会重新初始化）
+        // 注意：lateinit var 不能设置为 null，只能通过重新赋值来重置
     }
     
     /**
