@@ -139,42 +139,13 @@ class MediaProjectionService : Service() {
         
         // 提供给外部获取音频数据的接口 - 使用环形缓冲区
         // 🔥 性能优化：提供直接读取到目标缓冲区的方法，避免 copyOf
-        fun getAudioDataInto(targetBuffer: ByteArray): Int {
-            return audioRingBuffer.read(targetBuffer)
+        fun getAudioDataInto(targetBuffer: ByteArray, outTimestamp: LongArray? = null): Int {
+            return audioRingBuffer.read(targetBuffer, outTimestamp)
         }
             
         // 🔥 性能优化：使用对象池减少 ByteArray 分配
         private val audioDataPool = ArrayDeque<ByteArray>(4).apply {
             repeat(4) { addLast(ByteArray(15360)) }
-        }
-            
-        // 保留旧方法以兼容（但标记为 deprecated）
-        @Deprecated("Use getAudioDataInto() for better performance", ReplaceWith("getAudioDataInto(targetBuffer)"))
-        fun getAudioData(): ByteArray? {
-            val readSize = audioRingBuffer.read(readBuffer)
-                    
-            if (readSize <= 0) {
-                Thread.sleep(1)
-//                android.util.Log.w("AudioCapture", "🔍 [getAudioData] Ring buffer is EMPTY! Size: ${audioRingBuffer.size()}, capacity: ${audioRingBuffer.getCapacity()}")
-                return null
-            } else {
-                val remaining = audioRingBuffer.size()
-                val capacity = audioRingBuffer.getCapacity()
-                val usagePercent = ((capacity - remaining) * 100) / capacity
-//                android.util.Log.d("AudioCapture", "🔍 [getAudioData] Got data: size=$readSize bytes, remaining=$remaining/$capacity, usage=$usagePercent%")
-                    
-                // 🔥 从对象池获取缓冲区，避免频繁 GC
-                val recycledBuffer = synchronized(audioDataPool) {
-                    if (audioDataPool.isNotEmpty()) {
-                        audioDataPool.removeFirst()
-                    } else {
-                        ByteArray(15360) // 池为空时创建新的
-                    }
-                }
-                    
-                System.arraycopy(readBuffer, 0, recycledBuffer, 0, readSize)
-                return recycledBuffer.copyOf(readSize)
-            }
         }
             
         // 🔥 回收音频数据缓冲区到对象池
@@ -493,6 +464,7 @@ class MediaProjectionService : Service() {
 //                android.util.Log.e("AudioCapture", "🎤 [THREAD] AudioCaptureThread STARTED")
                 var readCount = 0
                 var emptyReadCount = 0
+                val timestampArray = LongArray(1) // 🔥 用于接收时间戳
                 
                 while (isAudioRecording && !Thread.interrupted()) {
                     try {
@@ -512,7 +484,19 @@ class MediaProjectionService : Service() {
                                 if (readCount <= 3 || readCount % 100 == 0) {
 //                                    android.util.Log.d("AudioCapture", "✅ Read #$readCount: $read bytes")
                                 }
-                                val success = audioRingBuffer.write(data, read)
+                                
+                                // 获取 AudioTimestamp（采集时的硬件时间戳）
+                                val audioTimestamp = android.media.AudioTimestamp()
+                                val getResult = audioRecord?.getTimestamp(audioTimestamp, android.media.AudioTimestamp.TIMEBASE_MONOTONIC)
+//                                val hasTimestamp = (getResult == android.media.AudioRecord.SUCCESS)
+                                val timestampNs =
+//                                    if (hasTimestamp) {
+                                    audioTimestamp.nanoTime
+//                                } else {
+//                                    System.nanoTime() // Fallback：使用系统时间
+//                                }
+                                
+                                val success = audioRingBuffer.write(data, read, timestampNs)
                                 if (!success && (readCount <= 3 || readCount % 100 == 0)) {
 //                                    android.util.Log.w("AudioCapture", "⚠️ Ring buffer FULL")
                                 }

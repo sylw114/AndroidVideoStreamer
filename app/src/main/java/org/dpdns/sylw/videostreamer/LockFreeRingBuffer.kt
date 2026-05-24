@@ -1,6 +1,16 @@
 package org.dpdns.sylw.videostreamer
 
+import android.util.Log
 import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * 音频数据包（包含 PCM 数据和时间戳）
+ */
+data class AudioPacket(
+    val data: ByteArray,
+    val size: Int,
+    val timestampNs: Long  // 采集时的纳秒时间戳
+)
 
 /**
  * 真正的无锁环形缓冲区（True Lock-Free Ring Buffer）
@@ -41,6 +51,9 @@ class LockFreeRingBuffer(
     // 🔥 核心数据结构：预分配所有内存，避免 GC
     private val buffer: Array<ByteArray> = Array(actualCapacity) { ByteArray(packetSize) }
     
+    // 🔥 新增：时间戳数组，与 buffer 一一对应
+    private val timestamps: LongArray = LongArray(actualCapacity)
+    
     // 🔥 无锁读写指针（AtomicInteger 保证原子性和可见性）
     // writePos: 下一个要写入的位置（单调递增，可能溢出）
     // readPos: 下一个要读取的位置（单调递增，可能溢出）
@@ -57,12 +70,14 @@ class LockFreeRingBuffer(
      * 
      * @param data 要写入的数据
      * @param size 实际数据大小（必须 <= packetSize）
+     * @param timestampNs 采集时的纳秒时间戳（可选）
      * @return true 表示写入成功，false 表示缓冲区已满（丢弃数据）
      */
-    fun write(data: ByteArray, size: Int = data.size): Boolean {
+    fun write(data: ByteArray, size: Int = data.size, timestampNs: Long = 0L): Boolean {
         if (size > packetSize) {
             throw IllegalArgumentException("Data size ($size) exceeds packet size ($packetSize)")
         }
+        if(data.size != packetSize) Log.w("ringBuffer", "actual data size is ${data.size}")
         
         // 🔥 获取当前读写位置（快照）
         val currentWritePos = writePos.get()
@@ -82,6 +97,9 @@ class LockFreeRingBuffer(
         // 🔥 零拷贝：直接写入预分配的缓冲区
         System.arraycopy(data, 0, buffer[pos], 0, size)
         
+        // 🔥 保存时间戳
+        timestamps[pos] = timestampNs
+        
         // 🔥 原子递增写指针（发布新数据，对消费者可见）
         writePos.incrementAndGet()
         
@@ -89,7 +107,7 @@ class LockFreeRingBuffer(
     }
     
     /**
-     * 从缓冲区读取数据（无锁）
+     * 从缓冲区读取数据和对应的时间戳（无锁）
      * 
      * 🔥 线程安全保证：
      * - 依赖单消费者假设（只有一个线程调用 read）
@@ -97,9 +115,10 @@ class LockFreeRingBuffer(
      * - 先读取数据，再原子递增读指针（消费语义）
      * 
      * @param output 输出缓冲区（复用，减少 GC）
+     * @param outTimestamp 输出时间戳数组（长度为 1，用于返回时间戳）
      * @return 实际读取的字节数，-1 表示缓冲区为空
      */
-    fun read(output: ByteArray): Int {
+    fun read(output: ByteArray, outTimestamp: LongArray? = null): Int {
         // 🔥 获取当前读写位置（快照）
         val currentReadPos = readPos.get()
         val currentWritePos = writePos.get()
@@ -115,6 +134,11 @@ class LockFreeRingBuffer(
         // 🔥 零拷贝：直接从缓冲区复制
         val dataSize = buffer[pos].size
         System.arraycopy(buffer[pos], 0, output, 0, dataSize)
+        
+        // 🔥 返回时间戳
+        if (outTimestamp != null && outTimestamp.size > 0) {
+            outTimestamp[0] = timestamps[pos]
+        }
         
         // 🔥 原子递增读指针（消费数据，释放空间给生产者）
         readPos.incrementAndGet()

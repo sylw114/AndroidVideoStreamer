@@ -160,7 +160,7 @@ class StreamManager(private val activity: Activity) {
     /**
      * 设置外部音频源
      */
-    fun setExternalAudioSource(audioSource: (() -> ByteArray?)?) {
+    fun setExternalAudioSource(audioSource: (() -> Pair<ByteArray, Long>?)?) {
         currentConfig = currentConfig.copy(externalAudioSource = audioSource)
 //        Log.d(TAG, "External audio source ${if (audioSource != null) "set" else "cleared"}")
     }

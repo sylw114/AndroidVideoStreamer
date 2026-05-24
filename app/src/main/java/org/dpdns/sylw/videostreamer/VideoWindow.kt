@@ -223,16 +223,19 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 
             // 3. 设置外部 PCM 音频源（从 MediaProjectionService 获取）
             // 🔥 性能优化：使用 getAudioDataInto() + 预分配缓冲区，减少 GC
+            // 🔥 关键修复：返回 Pair<ByteArray, Long>，包含 PCM 数据和采集时间戳
             val pcmReadBuffer = ByteArray(15360) // 预分配缓冲区
+            val timestampArray = LongArray(1) // 🔥 用于接收时间戳
             streamManager?.setExternalAudioSource {
-                val readSize = binder.getAudioDataInto(pcmReadBuffer)
+                val readSize = binder.getAudioDataInto(pcmReadBuffer, timestampArray)
                 if (readSize > 0) {
-                    pcmReadBuffer.copyOf(readSize)
+                    val timestampNs = timestampArray[0]
+                    Pair(pcmReadBuffer.copyOf(readSize), timestampNs)
                 } else {
                     null
                 }
             }
-//            android.util.Log.d("AudioCapture", "External audio source set from MediaProjectionService (optimized)")
+//            android.util.Log.d("AudioCapture", "External audio source set from MediaProjectionService (with timestamp)")
 
             // 4. 设置 MediaProjectionService binder 到 StreamManager（供协议层使用）
             streamManager?.setMediaProjectionServiceBinder(binder)

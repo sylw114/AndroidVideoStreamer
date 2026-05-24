@@ -36,7 +36,7 @@ class SurfaceTextureEncoder(
     private val audioSampleRate: Int = 48000,  // 音频采样率
     private val audioChannelCount: Int = 2,    // 音频声道数
     private val audioBitrate: Int = 128000,     // 音频码率 bps
-    private val externalAudioSource: (() -> ByteArray?)? = null,  // 外部 PCM 音频源回调
+    private val externalAudioSource: (() -> Pair<ByteArray, Long>?)? = null,  // 外部 PCM 音频源回调（返回 PCM 数据和采集时间戳）
     private val isCameraMode: Boolean = false  // 🔥 Camera 模式标志
 ) {
     companion object {
@@ -83,6 +83,9 @@ class SurfaceTextureEncoder(
     
     // 🔥 统一的时间基准：推流开始时的系统时间（纳秒）
     private var streamStartTimeNs = -1L
+    
+    // 🔥 关键修复：音频 PCM 采集的第一个时间戳（用于对齐音视频起点）
+    private var firstAudioPcmTimestampNs = -1L
     
     /**
      * 去除 NAL 单元的起始码（00 00 00 01 或 00 00 01）
@@ -950,10 +953,10 @@ class SurfaceTextureEncoder(
                         continue
                     }
                     
-                    val pcmData = externalAudioSource.invoke()
+                    val result = externalAudioSource.invoke()
                     
                     // 🔥 详细诊断 PCM 数据获取
-                    if (pcmData == null) {
+                    if (result == null) {
                         consecutiveFailures++
                         // 🔥 关键修复：增加等待时间，避免过度消耗 CPU 和造成假性繁忙
                         val sleepTime = when {
@@ -969,6 +972,8 @@ class SurfaceTextureEncoder(
                         Thread.sleep(sleepTime)
                         continue
                     }
+                    
+                    val (pcmData, timestampNs) = result
                     
                     if (pcmData.isEmpty()) {
                         consecutiveFailures++
@@ -993,12 +998,12 @@ class SurfaceTextureEncoder(
                     
                     // 🔥 降低日志频率，避免影响性能
                     if (frameCount % 100 == 0L) {
-//                        Log.d("AudioCapture", "📥 [Frame #$frameCount] Got PCM from source: size=${pcmData.size} bytes")
+//                        Log.d("AudioCapture", "📥 [Frame #$frameCount] Got PCM from source: size=${pcmData.size} bytes, ts=$timestampNs ns")
 //                        Log.d("AudioCapture", "   Sample rate: $audioSampleRate Hz, Channels: $audioChannelCount")
                     }
                     
-                    // 将 PCM 数据输入到 MediaCodec 进行编码
-                    encodeAndSendAudioData(pcmData)
+                    // 将 PCM 数据和时间戳输入到 MediaCodec 进行编码
+                    encodeAndSendAudioData(pcmData, timestampNs)
                     
                     // 🔥 关键修复：移除固定延迟，改用动态等待策略
                     // 原因：75ms 延迟导致编码器输入输出不同步，造成数据堆积和损坏
@@ -1064,14 +1069,14 @@ class SurfaceTextureEncoder(
      * 
      * 🔥 关键修复点：
      * - 输入缓冲区满时，主动处理输出来腾出空间
-     * - 时间戳基于输入的采样点数计算，而非系统时间
+     * - 时间戳基于 PCM 采集时的硬件时间戳推算，而非系统时间
      * - 确保 CODEC_CONFIG 数据被完整处理
      */
     private var audioInputFrameCount = 0L
     private var audioOutputFrameCount = 0L
     private var audioTotalSamplesQueued = 0L // 已输入编码器的总采样数
     
-    private fun encodeAndSendAudioData(pcmData: ByteArray) {
+    private fun encodeAndSendAudioData(pcmData: ByteArray, pcmTimestampNs: Long) {
         if (mediaCodecAudio == null) {
 //            Log.w(TAG, "❌ Audio encoder not initialized!")
             return
@@ -1083,7 +1088,7 @@ class SurfaceTextureEncoder(
             drainAudioEncoderOutput()
             
             // ========== 第二步：输入新的 PCM 数据 ==========
-            queueAudioInputData(pcmData)
+            queueAudioInputData(pcmData, pcmTimestampNs)
             
             // ========== 第三步：再次处理可能生成的新输出 ==========
             // 某些编码器会立即产生输出
@@ -1177,14 +1182,13 @@ class SurfaceTextureEncoder(
                         outputBuffer?.get(aacData, 0, bufferInfo.size)
                         outputBuffer?.clear()
                         
-                        // 🔥 关键修复：音频时间戳基于统一的 streamStartTimeNs 计算
-                        // 这样可以确保音频和视频使用相同的时间基准，避免起点不一致导致的音画不同步
-                        val elapsedNs = System.nanoTime() - streamStartTimeNs
-                        val timestampMs = elapsedNs / 1_000_000
+                        // 🔥 关键修复：使用 MediaCodec 输出的 presentationTimeUs（已在输入时设置为 PCM 硬件时间戳）
+                        // 这样保证音频时间戳源自采集时的硬件时钟，而非系统时间
+                        val timestampMs = bufferInfo.presentationTimeUs / 1000L
                         
                         // 🔥 诊断日志（降低频率）
                         if (audioOutputFrameCount % 50 == 0L) {
-//                            Log.d("AudioEncode", "📤 [Frame #$audioOutputFrameCount] AAC frame: size=${aacData.size}, ts=$timestampMs ms")
+//                            Log.d("AudioEncode", "📤 [Frame #$audioOutputFrameCount] AAC frame: size=${aacData.size}, ts=$timestampMs ms (from pts=${bufferInfo.presentationTimeUs}us)")
                         }
                         
                         if (rtmpPusher != null) {
@@ -1221,7 +1225,7 @@ class SurfaceTextureEncoder(
      * 解决方案：
      * - 将 PCM 数据拆分为完整的 AAC 帧（每帧 4096 字节）
      * - 不完整的帧累积到下次再发送
-     * - 时间戳基于当前帧的相对位置，而非总累加值
+     * - 🔥 关键：使用 PCM 采集时的硬件时间戳推算每个 AAC 帧的时间戳
      */
     private var audioPendingBuffer = ByteArrayOutputStream() // 缓存未完成的 PCM 数据
     private val AAC_FRAME_SIZE = 1024 * audioChannelCount * 2 // 4096 bytes @48kHz stereo
@@ -1237,12 +1241,24 @@ class SurfaceTextureEncoder(
     private val AUDIO_SAMPLES_PER_FRAME = 1024 // AAC 每帧 1024 个采样点
     private var audioPendingOffset = 0 // 🔥 待处理缓冲区的起始偏移量
     
-    private fun queueAudioInputData(pcmData: ByteArray) {
+    // 🔥 新增：保存当前 PCM 包的时间戳，用于推算 AAC 帧时间戳
+    private var currentPcmTimestampNs = 0L
+    
+    private fun queueAudioInputData(pcmData: ByteArray, pcmTimestampNs: Long) {
         if (mediaCodecAudio == null) {
 //            Log.e("AudioEncode", "❌ mediaCodecAudio is NULL! Encoder released?")
             return
         }
         
+        // 🔥 关键修复：记录第一个 PCM 时间戳作为音频起点基准
+        if (firstAudioPcmTimestampNs == -1L) {
+            firstAudioPcmTimestampNs = pcmTimestampNs
+//            Log.d("AudioEncode", "🎯 First audio PCM timestamp recorded: $pcmTimestampNs ns")
+        }
+        
+        // 🔥 保存 PCM 时间戳，用于后续推算 AAC 帧时间戳
+        currentPcmTimestampNs = pcmTimestampNs
+
         // 🔥 关键修复：检查编码器状态（降低日志频率）
         if (audioInputFrameCount % 100 == 0L) {
             try {
@@ -1260,6 +1276,7 @@ class SurfaceTextureEncoder(
         audioPendingBuffer.write(pcmData)
         
         // 🔥 循环提交完整的 AAC 帧（使用偏移量避免重复复制）
+        var frameIndex = 0 // 🔥 当前 PCM 包中的第几帧
         while (audioPendingBuffer.size() - audioPendingOffset >= AAC_FRAME_SIZE) {
             // 🔥 性能优化：直接获取内部数组，避免 toByteArray() 复制
             val allData = audioPendingBuffer.toByteArray()
@@ -1268,8 +1285,19 @@ class SurfaceTextureEncoder(
             // 🔥 移动偏移量，指向下一帧的起始位置
             audioPendingOffset += AAC_FRAME_SIZE
             
-            // 提交单个完整帧到编码器
-            submitAudioFrameToEncoder(frameData)
+            // 🔥 推算当前 AAC 帧的时间戳
+            // 原理：PCM 包中有多个 AAC 帧，每帧间隔固定时间
+            // 🔥 关键修复：使用相对于第一个 PCM 时间戳的偏移，与视频时间戳起点对齐
+            val timeIncrementPerFrameNs = (AUDIO_SAMPLES_PER_FRAME * 1_000_000_000L) / audioSampleRate
+            val absoluteFrameTimestampNs = pcmTimestampNs + (frameIndex * timeIncrementPerFrameNs)
+
+            // 转换为相对于推流开始的时间（微秒）
+            val relativeFrameTimestampNs = absoluteFrameTimestampNs - firstAudioPcmTimestampNs
+            val frameTimestampUs = relativeFrameTimestampNs / 1000L  // 纳秒 → 微秒
+            frameIndex++
+            
+            // 提交单个完整帧到编码器（带时间戳，单位：微秒）
+            submitAudioFrameToEncoder(frameData, frameTimestampUs)
         }
         
         // 🔥 关键优化：当已处理的数据足够多时，压缩缓冲区（只复制一次剩余数据）
@@ -1298,7 +1326,7 @@ class SurfaceTextureEncoder(
     /**
      * 提交单个 AAC 帧到编码器
      */
-    private fun submitAudioFrameToEncoder(frameData: ByteArray) {
+    private fun submitAudioFrameToEncoder(frameData: ByteArray, frameTimestampUs: Long) {
         // 尝试获取输入缓冲区
         val inputBufferIndex = mediaCodecAudio!!.dequeueInputBuffer(0)  // 非阻塞
         
@@ -1328,23 +1356,22 @@ class SurfaceTextureEncoder(
                 inputBuffer.put(frameData)
             }
             
-            // 🔥 关键修复：计算递增的时间戳（避免累加溢出）
-            // 每帧 AAC 固定 1024 个采样点，时间增量 = 1024 / sampleRate 秒
-            val timeIncrementUs = (AUDIO_SAMPLES_PER_FRAME * 1_000_000L) / audioSampleRate
-            audioLastInputTimeUs += timeIncrementUs
+            // 🔥 关键修复：使用相对于第一个 PCM 时间戳的时间（已在调用处转换）
+            // 这样音频和视频都从 0 开始，起点完全对齐
+            val presentationTimeUs = frameTimestampUs
             
             mediaCodecAudio!!.queueInputBuffer(
                 inputBufferIndex,
                 0,
                 frameData.size,
-                audioLastInputTimeUs,
+                presentationTimeUs,
                 0  // flags = 0 (不是 EOS)
             )
             
             audioInputFrameCount++
             
             if (audioInputFrameCount % 100 == 0L) {
-//                Log.d("AudioEncode", "📥 Queued PCM frame #$audioInputFrameCount: size=${frameData.size}, ts=${audioLastInputTimeUs}us")
+//                Log.d("AudioEncode", "📥 Queued PCM frame #$audioInputFrameCount: size=${frameData.size}, ts=${presentationTimeUs}us (from PCM ts=$frameTimestampNs ns)")
             }
             
         } catch (e: Exception) {

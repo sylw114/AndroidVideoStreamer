@@ -86,5 +86,5 @@ data class StreamingConfig(
     val audioBitrate: Int = 128_000,   // 128 kbps
     val mediaProjection: MediaProjection? = null,
     val mediaProjectionServiceBinder: MediaProjectionService.LocalBinder? = null,
-    val externalAudioSource: (() -> ByteArray?)? = null
+    val externalAudioSource: (() -> Pair<ByteArray, Long>?)? = null  // 🔥 返回 PCM 数据和采集时间戳
 )
