@@ -367,8 +367,7 @@ class SurfaceTextureEncoder(
                 setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                 // 🔥 极低延迟优化：启用编码器低延迟模式
                 setInteger("low-latency", 1)  // 某些设备支持此私有参数
-                // 🔥 提高操作速率，减少编码队列延迟
-                setInteger(MediaFormat.KEY_OPERATING_RATE, frameRate * 2)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, frameRate)
                 // 🔥 关键优化：降低编码质量以换取速度（可选）
                 setInteger(MediaFormat.KEY_QUALITY, 0)  // 0=最快，100=最高质量
                 // 🔥 禁用B帧和参考帧优化，进一步降低延迟
