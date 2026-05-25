@@ -125,17 +125,21 @@ class StreamManager(private val activity: Activity) {
         height: Int,
         bitrate: Int,
         frameRate: Int = 30,
-        iFrameInterval: Int = 5
+        iFrameInterval: Int = 5,
+        videoMode: String = "CBR",
+        videoQuality: Int = 70
     ) {
         currentConfig = currentConfig.copy(
             width = width,
             height = height,
             videoBitrate = bitrate,
             frameRate = frameRate,
-            iFrameInterval = iFrameInterval
+            iFrameInterval = iFrameInterval,
+            videoMode = videoMode,
+            videoQuality = videoQuality
         )
         
-//        Log.d(TAG, "Video params updated: ${width}x${height}, bitrate=$bitrate, fps=$frameRate")
+//        Log.d(TAG, "Video params updated: ${width}x${height}, bitrate=$bitrate, fps=$frameRate, mode=$videoMode, quality=$videoQuality")
     }
     
     /**

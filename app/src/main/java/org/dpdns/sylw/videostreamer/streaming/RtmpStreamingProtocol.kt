@@ -48,6 +48,8 @@ class RtmpStreamingProtocol : IStreamingProtocol {
                 videoBitrate = config.videoBitrate,
                 frameRate = config.frameRate,
                 iFrameInterval = config.iFrameInterval,
+                videoMode = config.videoMode,
+                videoQuality = config.videoQuality,
                 useAudio = config.useAudio,
                 audioSampleRate = config.audioSampleRate,
                 audioChannelCount = config.audioChannelCount,

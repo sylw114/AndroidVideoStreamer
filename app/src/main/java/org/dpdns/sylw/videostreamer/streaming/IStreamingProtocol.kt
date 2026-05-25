@@ -80,11 +80,13 @@ data class StreamingConfig(
     val videoBitrate: Int = 2500_000,  // 2.5 Mbps
     val frameRate: Int = 30,
     val iFrameInterval: Int = 5,
+    val videoMode: String = "CBR",    // 🔥 新增：CBR 或 CQ
+    val videoQuality: Int = 70,       // 🔥 新增：0-100
     val useAudio: Boolean = true,
     val audioSampleRate: Int = 48000,
     val audioChannelCount: Int = 2,
     val audioBitrate: Int = 128_000,   // 128 kbps
-    val mediaProjection: MediaProjection? = null,
-    val mediaProjectionServiceBinder: MediaProjectionService.LocalBinder? = null,
+    val mediaProjection: android.media.projection.MediaProjection? = null,
+    val mediaProjectionServiceBinder: org.dpdns.sylw.videostreamer.MediaProjectionService.LocalBinder? = null,
     val externalAudioSource: (() -> Pair<ByteArray, Long>?)? = null  // 🔥 返回 PCM 数据和采集时间戳
 )

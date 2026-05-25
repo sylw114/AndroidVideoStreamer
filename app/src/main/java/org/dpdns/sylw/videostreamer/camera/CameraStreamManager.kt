@@ -46,7 +46,9 @@ class CameraStreamManager(private val context: Context) {
     private var currentWidth: Int = 1920
     private var currentHeight: Int = 1080
     private var currentFrameRate: Int = 30
-    private var videoBitrate: Int = 2500_000  // 从全局配置读取
+    private var videoBitrate: Int = 2500_000
+    private var videoMode: String = "CBR"
+    private var videoQuality: Int = 70
     
     // 摄像头状态
     private var isCameraReady: Boolean = false
@@ -147,14 +149,16 @@ class CameraStreamManager(private val context: Context) {
      * 打开摄像头（仅初始化 Camera，不创建编码器）
      */
     @RequiresPermission(Manifest.permission.CAMERA)
-    fun openCamera(cameraId: String, width: Int, height: Int, frameRate: Int, bitrate: Int) {
-//        Log.d(TAG, "Opening camera: $cameraId, resolution: ${width}x${height}, fps: $frameRate")
+    fun openCamera(cameraId: String, width: Int, height: Int, frameRate: Int, bitrate: Int, mode: String = "CBR", quality: Int = 70) {
+//        Log.d(TAG, "Opening camera: $cameraId, resolution: ${width}x${height}, fps: $frameRate, mode=$mode, quality=$quality")
         
         currentCameraId = cameraId
         currentWidth = width
         currentHeight = height
         currentFrameRate = frameRate
         videoBitrate = bitrate
+        videoMode = mode
+        videoQuality = quality
         
         try {
             // 🔥 只有在摄像头已打开时才关闭（避免首次打开时的无效调用）
@@ -271,6 +275,8 @@ class CameraStreamManager(private val context: Context) {
                 videoBitrate = videoBitrate,
                 frameRate = currentFrameRate,
                 iFrameInterval = 5,
+                videoMode = videoMode,
+                videoQuality = videoQuality,
                 useAudio = false,
                 externalAudioSource = null,
                 isCameraMode = true

@@ -173,7 +173,8 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 //            android.util.Log.d("VideoWindow", "Loaded saved frame rate: $savedFrameRate")
 
         val savedProtocol = StreamConfig.getStreamingProtocol()!!
-//            android.util.Log.d("VideoWindow", "Loaded saved protocol: $savedProtocol")
+        val savedMode = StreamConfig.getRateMode() ?: "CBR"
+        val savedQuality = StreamConfig.getCqQuality() ?: 70
 
         // 初始化协议（使用保存的协议）
         streamManager?.init(savedProtocol)
@@ -183,7 +184,9 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             width = 1920,  // 默认宽度，后续会根据屏幕方向调整
             height = 1080, // 默认高度
             bitrate = savedBitrate,
-            frameRate = savedFrameRate
+            frameRate = savedFrameRate,
+            videoMode = savedMode,
+            videoQuality = savedQuality
         )
 
 
@@ -348,7 +351,9 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                     height = actualHeight,
                                     bitrate = savedBitrate,
                                     frameRate = 30,
-                                    iFrameInterval = 5
+                                    iFrameInterval = 5,
+                                    videoMode = StreamConfig.getRateMode() ?: "CBR",
+                                    videoQuality = StreamConfig.getCqQuality() ?: 70
                                 )
 
 //                                android.util.Log.d("VideoWindow", "准备调用 toggleStreaming(true)")
@@ -411,7 +416,9 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                                 height = actualHeight,
                                                 bitrate = savedBitrate,
                                                 frameRate = savedFrameRate,
-                                                iFrameInterval = 5
+                                                iFrameInterval = 5,
+                                                videoMode = StreamConfig.getRateMode() ?: "CBR",
+                                                videoQuality = StreamConfig.getCqQuality() ?: 70
                                             )
 
                                             manager.startStreaming(rtmpUrl)

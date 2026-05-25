@@ -54,6 +54,8 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     var selectedResolution by remember { mutableStateOf("1920x1080") }
     var selectedFrameRate by remember { mutableIntStateOf(30) }
     var videoBitrate by remember { mutableIntStateOf(2500_000) }  // 从全局配置读取
+    var videoMode by remember { mutableStateOf("CBR") }
+    var videoQuality by remember { mutableIntStateOf(70) }
     
     // 下拉菜单展开状态
     var cameraMenuExpanded by remember { mutableStateOf(false) }
@@ -132,7 +134,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                     val (width, height) = selectedResolution.split("x").map { it.toInt() }
 //                    android.util.Log.d("CameraWindow", "Starting camera: $cameraId, ${width}x${height}, ${selectedFrameRate}fps")
-                    cameraManager?.openCamera(cameraId, width, height, selectedFrameRate, videoBitrate)
+                    cameraManager?.openCamera(cameraId, width, height, selectedFrameRate, videoBitrate, videoMode, videoQuality)
                 } else {
                     // 请求权限
                     permissionLauncher.launch(Manifest.permission.CAMERA)
@@ -196,8 +198,10 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         // 🔥 仅初始化 Camera 管理器并获取摄像头列表（不需要权限）
         initCameraManager()
         
-        // 加载全局码率配置
+        // 加载全局配置
         videoBitrate = loadBitrate(context)
+        videoMode = loadVideoMode(context)
+        videoQuality = loadVideoQuality(context)
     }
     
     // 🔥 当摄像头切换时，更新默认分辨率和帧率
@@ -257,7 +261,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                     text = "$selectedResolution @ ${selectedFrameRate}fps",
                 )
                 Text(
-                    text = "码率: ${videoBitrate / 1000} kbps",
+                    text = if (videoMode == "CBR") "码率: ${videoBitrate / 1000} kbps" else "质量: $videoQuality",
                 )
                 Text(
                     text = "无音频",

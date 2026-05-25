@@ -32,6 +32,8 @@ class SurfaceTextureEncoder(
     private val videoBitrate: Int,        // 视频码率 bps
     private val frameRate: Int = 30,       // 帧率
     private val iFrameInterval: Int = 1,   // 🔥 极低延迟：I帧间隔从2秒降到1秒
+    private val videoMode: String = "CBR", // 🔥 新增：编码模式
+    private val videoQuality: Int = 70,    // 🔥 新增：编码质量
     private val useAudio: Boolean = true,  // 是否使用音频
     private val audioSampleRate: Int = 48000,  // 音频采样率
     private val audioChannelCount: Int = 2,    // 音频声道数
@@ -365,13 +367,17 @@ class SurfaceTextureEncoder(
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
                 setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
                 setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-                // 🔥 极低延迟优化：启用编码器低延迟模式
-                setInteger("low-latency", 1)  // 某些设备支持此私有参数
+                if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+                    setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, frameRate)
-                // 🔥 关键优化：降低编码质量以换取速度（可选）
-                setInteger(MediaFormat.KEY_QUALITY, 0)  // 0=最快，100=最高质量
-                // 🔥 禁用B帧和参考帧优化，进一步降低延迟
-//                setInteger("vendor.qti-ext-enc-disable-b-frame", 1)  // Qualcomm专有
+                
+                if (videoMode == "CBR") {
+                    setInteger(MediaFormat.KEY_COMPLEXITY, 0)
+                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                } else {
+                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ)
+                    setInteger(MediaFormat.KEY_QUALITY, videoQuality)
+                }
             }
             
 //            Log.d(TAG, "Creating encoder with format: $format")

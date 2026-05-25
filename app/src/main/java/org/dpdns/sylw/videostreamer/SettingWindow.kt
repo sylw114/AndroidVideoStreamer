@@ -1,8 +1,10 @@
 package org.dpdns.sylw.videostreamer
 
 import android.content.Context
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,6 +17,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -45,6 +48,8 @@ private val PREF_STREAM_URL = stringPreferencesKey("stream_url")
 private val PREF_VIDEO_BITRATE = intPreferencesKey("video_bitrate")
 private val PREF_FRAME_RATE = intPreferencesKey("frame_rate")
 private val PREF_STREAMING_PROTOCOL = stringPreferencesKey("streaming_protocol")
+private val PREF_VIDEO_MODE = stringPreferencesKey("video_mode")
+private val PREF_VIDEO_QUALITY = intPreferencesKey("video_quality")
 
 /**
  * 全局推流配置管理器
@@ -54,6 +59,8 @@ object StreamConfig {
     private var _videoBitrate: Int? = null
     private var _frameRate: Int? = null
     private var _streamingProtocol: String? = null
+    private var _videoMode: String? = "CBR"
+    private var _videoQuality: Int? = 70
 
     /**
      * 获取当前推流 URL（从内存缓存读取）
@@ -77,6 +84,14 @@ object StreamConfig {
     fun getStreamingProtocol(): String? = _streamingProtocol
     fun setStreamingProtocol(protocol: String?) {
         _streamingProtocol = protocol
+    }
+    fun getRateMode(): String? = _videoMode
+    fun setVideoMode(mode: String?) {
+        _videoMode = mode
+    }
+    fun getCqQuality(): Int? = _videoQuality
+    fun setVideoQuality(quality: Int?) {
+        _videoQuality = quality
     }
 }
 
@@ -128,6 +143,30 @@ suspend fun loadProtocol(context: Context): String {
     }.first()
 }
 
+suspend fun saveVideoMode(context: Context, mode: String) {
+    context.dataStore.edit { settings ->
+        settings[PREF_VIDEO_MODE] = mode
+    }
+}
+
+suspend fun loadVideoMode(context: Context): String {
+    return context.dataStore.data.map { preferences ->
+        preferences[PREF_VIDEO_MODE] ?: "CBR"
+    }.first()
+}
+
+suspend fun saveVideoQuality(context: Context, quality: Int) {
+    context.dataStore.edit { settings ->
+        settings[PREF_VIDEO_QUALITY] = quality
+    }
+}
+
+suspend fun loadVideoQuality(context: Context): Int {
+    return context.dataStore.data.map { preferences ->
+        preferences[PREF_VIDEO_QUALITY] ?: 70
+    }.first()
+}
+
 @Composable
 fun SettingWindow(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -138,10 +177,15 @@ fun SettingWindow(modifier: Modifier = Modifier) {
     
     // 视频码率 (kbps)
     var bitrateKbps by remember { mutableIntStateOf(2500) }
+    var bitrateInput by remember { mutableStateOf(bitrateKbps.toString()) }
+
+    // 编码模式 (CBR/CQ)
+    var videoMode by remember { mutableStateOf("CBR") }
+    // 编码质量 (0-100)
+    var videoQuality by remember { mutableIntStateOf(70) }
     
     // 帧率
     var frameRate by remember { mutableIntStateOf(30) }
-    var bitrateInput by remember { mutableStateOf(bitrateKbps.toString()) }
     
     // 可选的帧率档位
     val availableFrameRates = listOf(30, 60, 120, 144, 165)
@@ -163,6 +207,7 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         StreamConfig.setVideoBitrate(savedBitrate)
         bitrateKbps = savedBitrate / 1024
         bitrateInput = bitrateKbps.toString()
+
         val savedFrameRate = loadFrameRate(context)
         StreamConfig.setFrameRate(savedFrameRate)
         frameRate = savedFrameRate
@@ -170,6 +215,14 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         val savedProtocol = loadProtocol(context)
         StreamConfig.setStreamingProtocol(savedProtocol)
         selectedProtocol = savedProtocol
+
+        val savedMode = loadVideoMode(context)
+        StreamConfig.setVideoMode(savedMode)
+        videoMode = savedMode
+
+        val savedQuality = loadVideoQuality(context)
+        StreamConfig.setVideoQuality(savedQuality)
+        videoQuality = savedQuality
     }
 
     fun onSaveUrl() {
@@ -196,6 +249,24 @@ fun SettingWindow(modifier: Modifier = Modifier) {
             saveProtocol(context, selectedProtocol)
         }
     }
+
+    fun onSaveMode(mode: String) {
+        videoMode = mode
+        StreamConfig.setVideoMode(mode)
+        scope.launch {
+            saveVideoMode(context, mode)
+        }
+    }
+
+    fun onSaveQuality(quality: Int) {
+        val clamped = quality.coerceIn(0, 100)
+        videoQuality = clamped
+        StreamConfig.setVideoQuality(clamped)
+        scope.launch {
+            saveVideoQuality(context, clamped)
+        }
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -240,13 +311,13 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         Box(modifier = Modifier.fillMaxWidth()) {
             Text(
                 text = "$selectedProtocol Streaming Url:",
-                modifier = Modifier.align(androidx.compose.ui.Alignment.CenterStart)
+                modifier = Modifier.align(Alignment.CenterStart)
             )
             Button(
                 onClick = { onSaveUrl() },
                 modifier = Modifier
                     .size(80.dp, 40.dp)
-                    .align(androidx.compose.ui.Alignment.CenterEnd),
+                    .align(Alignment.CenterEnd),
                 shape = androidx.compose.ui.graphics.RectangleShape,
             ) {
                 Text(text = "Save")
@@ -264,40 +335,119 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         )
             
         Spacer(modifier = Modifier.height(24.dp))
-        
-        // 视频码率输入框
+
+        // 编码模式选择 (CBR / CQ)
         Text(
-            text = "Video Bitrate:",
+            text = "Video Encoding Mode:",
             modifier = Modifier.padding(bottom = 8.dp)
         )
-        OutlinedTextField(
-            value = bitrateInput,
-            onValueChange = { bitrateInput = it },
-            keyboardOptions = KeyboardOptions(
-                keyboardType = KeyboardType.Number,
-                imeAction = ImeAction.Done
-            ),
-            singleLine = true,
-            label = { Text("Bitrate (kbps)") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        Button(
-            onClick = { 
-                val inputBitrate = bitrateInput.toIntOrNull()
-                if (inputBitrate != null) {
-                    bitrateKbps = inputBitrate
-                    onSaveBitrate()
-                }
-            },
-            modifier = Modifier
-                .width(80.dp)
-                .padding(top = 8.dp),
-            shape = androidx.compose.ui.graphics.RectangleShape,
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Text(text = "Save")
+            listOf("CBR", "CQ").forEach { mode ->
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Checkbox(
+                        checked = videoMode == mode,
+                        onCheckedChange = {
+                            if (it) {
+                                onSaveMode(mode)
+                            }
+                        }
+                    )
+                    Text(
+                        text = mode,
+                        modifier = Modifier.padding(start = 4.dp)
+                    )
+                }
+            }
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
         
-        Spacer(modifier = Modifier.height(24.dp))
+        // 视频码率输入框 (仅在 CBR 模式下显示)
+        if (videoMode == "CBR") {
+            Text(
+                text = "Video Bitrate:",
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            OutlinedTextField(
+                value = bitrateInput,
+                onValueChange = { bitrateInput = it },
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Number,
+                    imeAction = ImeAction.Done
+                ),
+                singleLine = true,
+                label = { Text("Bitrate (kbps)") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Button(
+                onClick = {
+                    val inputBitrate = bitrateInput.toIntOrNull()
+                    if (inputBitrate != null) {
+                        bitrateKbps = inputBitrate
+                        onSaveBitrate()
+                    }
+                },
+                modifier = Modifier
+                    .width(80.dp)
+                    .padding(top = 8.dp),
+                shape = androidx.compose.ui.graphics.RectangleShape,
+            ) {
+                Text(text = "Save")
+            }
+            Spacer(modifier = Modifier.height(24.dp))
+        }
+
+        // 视频质量设置 (仅在 CQ 模式下显示)
+        if (videoMode == "CQ") {
+            Text(
+                text = "Video Quality: $videoQuality",
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Slider(
+                value = videoQuality.toFloat(),
+                onValueChange = { onSaveQuality(it.toInt()) },
+                valueRange = 0f..100f,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Button(
+                    onClick = { if (videoQuality > 0) onSaveQuality(videoQuality - 1) },
+                    modifier = Modifier.size(50.dp, 40.dp),
+                    shape = androidx.compose.ui.graphics.RectangleShape,
+                    contentPadding = PaddingValues(0.dp)
+                ) {
+                    Text("-")
+                }
+                
+                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = videoQuality.toString()
+                    )
+                }
+                
+                Button(
+                    onClick = { if (videoQuality < 100) onSaveQuality(videoQuality + 1) },
+                    modifier = Modifier.size(50.dp, 40.dp),
+                    shape = androidx.compose.ui.graphics.RectangleShape,
+                    contentPadding = PaddingValues(0.dp)
+                ) {
+                    Text("+")
+                }
+            }
+            Spacer(modifier = Modifier.height(24.dp))
+        }
         
         // 帧率设置
         Text(
