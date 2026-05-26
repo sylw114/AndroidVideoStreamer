@@ -37,6 +37,11 @@ class MediaProjectionService : Service() {
     private var audioRecord: AudioRecord? = null
     private var audioThread: Thread? = null
     private var isAudioRecording = false
+    
+    // 🔥 标记是否为视频推流音频（用于旋转时决定是否暂停）
+    // true = 视频推流音频（旋转时需要暂停）
+    // false = 独立TCP音频（旋转时不暂停）
+    private var isVideoPushAudio: Boolean = true
 
     // 🛑 必须持有这个引用，否则可能被 GC 回收导致画面停止，且需要在 onDestroy 中释放
     private var dummySurfaceTexture: SurfaceTexture? = null
@@ -141,6 +146,12 @@ class MediaProjectionService : Service() {
         }
 
         fun stopAudioCapture() = this@MediaProjectionService.stopAudioCapture()
+        
+        // 🔥 设置音频采集模式（视频推流 or 独立TCP音频）
+        fun setAudioCaptureMode(isVideoPush: Boolean) {
+            this@MediaProjectionService.isVideoPushAudio = isVideoPush
+//            android.util.Log.d("MediaProj", "Audio capture mode set to: ${if (isVideoPush) "Video Push" else "Independent TCP"}")
+        }
         
         // 🔥 获取音频包大小（用于外部缓冲区分配）
         fun getAudioPacketSize(): Int = audioPacketSize
@@ -584,8 +595,13 @@ class MediaProjectionService : Service() {
             return
         }
         
-        // 3. 🔥 关键修复：先停止音频采集并清空缓冲区，防止旧数据累积
-        stopAudioCapture()
+        // 3. 🔥 关键修复：仅当是视频推流音频时才停止采集
+        // TCP独立音频流不需要暂停，可以持续采集
+        if (isVideoPushAudio) {
+            stopAudioCapture()
+        } else {
+//            android.util.Log.d("MediaProj", "Skipping audio capture stop for independent TCP audio")
+        }
         
         // 4. 更新缓存的尺寸
         cachedWidth = newWidth

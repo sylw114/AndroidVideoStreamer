@@ -1,6 +1,7 @@
 package org.dpdns.sylw.videostreamer.camera
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
@@ -263,6 +264,7 @@ class CameraStreamManager(private val context: Context) {
     /**
      * 创建编码器并启动预览（内部方法）
      */
+    @SuppressLint("MissingPermission")
     private fun createEncoderAndStartPreview(rtmpUrl: String) {
         Log.d(TAG, "Creating encoder and starting preview...")
         
