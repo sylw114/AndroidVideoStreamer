@@ -53,11 +53,6 @@ fun VideoWindow(modifier: Modifier = Modifier) {
     var tcpAudioManager by remember { mutableStateOf<TcpAudioManager?>(null) }
     var isTcpAudioStreaming by remember { mutableStateOf(false) }
     
-    // 🔥 TCP音频配置对话框状态
-    var showTcpAudioConfig by remember { mutableStateOf(false) }
-    var tcpAudioIp by remember { mutableStateOf("127.0.0.1") }
-    var tcpAudioPort by remember { mutableStateOf("9999") }
-
     // 从全局配置读取推流 URL（使用可变状态）
     var currentRtmpUrl by remember { mutableStateOf<String?>(null) }
 
@@ -210,13 +205,6 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             }
         }
         
-        // 🔥 加载TCP音频配置
-        scope.launch {
-            tcpAudioIp = loadTcpAudioIp(context)
-            tcpAudioPort = loadTcpAudioPort(context).toString()
-        }
-
-
         onDispose {
             streamManager?.release()
             streamManager = null
@@ -499,14 +487,18 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                         tcpAudioManager?.stop()
                     } else {
                         // 启动TCP音频
-                        mediaProjectionService?.let { binder ->
-                            val config = binder.getService().config
-                            
-                            // 🔥 设置为独立TCP音频模式（旋转时不暂停）
-                            binder.setAudioCaptureMode(isVideoPush = false)
-                            tcpAudioManager?.updateConfig(tcpAudioIp, tcpAudioPort.toIntOrNull() ?: 9999, true)
-                            tcpAudioManager?.start(config)
-//                            android.util.Log.d("VideoWindow", "Starting TCP audio to $tcpAudioIp:$tcpAudioPort")
+                        scope.launch {
+                            val ip = loadTcpAudioIp(context)
+                            val port = loadTcpAudioPort(context)
+                            mediaProjectionService?.let { binder ->
+                                val config = binder.getService().config
+                                
+                                // 🔥 设置为独立TCP音频模式（旋转时不暂停）
+                                binder.setAudioCaptureMode(isVideoPush = false)
+                                tcpAudioManager?.updateConfig(ip, port, true)
+                                tcpAudioManager?.start(config)
+    //                            android.util.Log.d("VideoWindow", "Starting TCP audio to $ip:$port")
+                            }
                         }
                     }
                 },
@@ -519,87 +511,6 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 }
             ) {
                 Text(if (isTcpAudioStreaming) "停止TCP音频" else "开始TCP音频")
-            }
-            
-            // 🔥 TCP音频配置按钮
-            Button(
-                onClick = { showTcpAudioConfig = true },
-                modifier = Modifier.width(60.dp),
-                enabled = isAuthorized
-            ) {
-                Text("⚙️")
-            }
-        }
-        
-        // 🔥 TCP音频配置对话框
-        if (showTcpAudioConfig) {
-            androidx.compose.ui.window.Dialog(
-                onDismissRequest = { showTcpAudioConfig = false }
-            ) {
-                androidx.compose.material3.Card(
-                    modifier = Modifier
-                        .fillMaxWidth(0.9f)
-                        .padding(16.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(16.dp)
-                    ) {
-                        Text(
-                            text = "TCP Audio Configuration",
-                            style = androidx.compose.ui.text.TextStyle(
-                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                                fontSize = androidx.compose.ui.unit.TextUnit(18f, androidx.compose.ui.unit.TextUnitType.Sp)
-                            ),
-                            modifier = Modifier.padding(bottom = 16.dp)
-                        )
-                        
-                        // 服务器IP
-                        Text("Server IP:", modifier = Modifier.padding(bottom = 4.dp))
-                        androidx.compose.material3.OutlinedTextField(
-                            value = tcpAudioIp,
-                            onValueChange = { tcpAudioIp = it },
-                            singleLine = true,
-                            placeholder = { androidx.compose.material3.Text("127.0.0.1") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        
-                        Spacer(modifier = Modifier.height(8.dp))
-                        
-                        // 服务器端口
-                        Text("Server Port:", modifier = Modifier.padding(bottom = 4.dp))
-                        androidx.compose.material3.OutlinedTextField(
-                            value = tcpAudioPort,
-                            onValueChange = { tcpAudioPort = it },
-                            singleLine = true,
-                            placeholder = { androidx.compose.material3.Text("9999") },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        
-                        Spacer(modifier = Modifier.height(16.dp))
-                        
-                        // 保存并关闭按钮
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End
-                        ) {
-                            androidx.compose.material3.Button(
-                                onClick = {
-                                    // 保存配置
-                                    scope.launch {
-                                        saveTcpAudioIp(context, tcpAudioIp)
-                                        val port = tcpAudioPort.toIntOrNull()
-                                        if (port != null && port in 1..65535) {
-                                            saveTcpAudioPort(context, port)
-                                        }
-                                        showTcpAudioConfig = false
-                                    }
-                                }
-                            ) {
-                                androidx.compose.material3.Text("Save")
-                            }
-                        }
-                    }
-                }
             }
         }
     }

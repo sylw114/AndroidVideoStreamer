@@ -54,7 +54,6 @@ private val PREF_STREAMING_PROTOCOL = stringPreferencesKey("streaming_protocol")
 private val PREF_VIDEO_MODE = stringPreferencesKey("video_mode")
 private val PREF_VIDEO_QUALITY = intPreferencesKey("video_quality")
 // 🔥 TCP音频配置
-private val PREF_TCP_AUDIO_ENABLED = androidx.datastore.preferences.core.booleanPreferencesKey("tcp_audio_enabled")
 private val PREF_TCP_AUDIO_IP = stringPreferencesKey("tcp_audio_ip")
 private val PREF_TCP_AUDIO_PORT = intPreferencesKey("tcp_audio_port")
 
@@ -102,14 +101,9 @@ object StreamConfig {
     }
     
     // 🔥 TCP音频配置访问方法
-    private var _tcpAudioEnabled: Boolean? = null
     private var _tcpAudioIp: String? = null
     private var _tcpAudioPort: Int? = null
     
-    fun getTcpAudioEnabled(): Boolean? = _tcpAudioEnabled
-    fun setTcpAudioEnabled(enabled: Boolean?) {
-        _tcpAudioEnabled = enabled
-    }
     fun getTcpAudioIp(): String? = _tcpAudioIp
     fun setTcpAudioIp(ip: String?) {
         _tcpAudioIp = ip
@@ -192,19 +186,6 @@ suspend fun loadVideoQuality(context: Context): Int {
     }.first()
 }
 
-// 🔥 TCP音频配置保存/加载函数
-suspend fun saveTcpAudioEnabled(context: Context, enabled: Boolean) {
-    context.dataStore.edit { settings ->
-        settings[PREF_TCP_AUDIO_ENABLED] = enabled
-    }
-}
-
-suspend fun loadTcpAudioEnabled(context: Context): Boolean {
-    return context.dataStore.data.map { preferences ->
-        preferences[PREF_TCP_AUDIO_ENABLED] ?: false
-    }.first()
-}
-
 suspend fun saveTcpAudioIp(context: Context, ip: String) {
     context.dataStore.edit { settings ->
         settings[PREF_TCP_AUDIO_IP] = ip
@@ -250,7 +231,6 @@ fun SettingWindow(modifier: Modifier = Modifier) {
     var frameRate by remember { mutableIntStateOf(30) }
     
     // 🔥 TCP音频配置
-    var tcpAudioEnabled by remember { mutableStateOf(false) }
     var tcpAudioIp by remember { mutableStateOf("127.0.0.1") }
     var tcpAudioPort by remember { mutableStateOf("9999") }
     
@@ -294,10 +274,6 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         videoQuality = savedQuality
         
         // 🔥 加载TCP音频配置
-        val savedTcpAudioEnabled = loadTcpAudioEnabled(context)
-        StreamConfig.setTcpAudioEnabled(savedTcpAudioEnabled)
-        tcpAudioEnabled = savedTcpAudioEnabled
-        
         val savedTcpAudioIp = loadTcpAudioIp(context)
         StreamConfig.setTcpAudioIp(savedTcpAudioIp)
         tcpAudioIp = savedTcpAudioIp
@@ -346,14 +322,6 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         StreamConfig.setVideoQuality(clamped)
         scope.launch {
             saveVideoQuality(context, clamped)
-        }
-    }
-    
-    // 🔥 TCP音频配置保存函数
-    fun onSaveTcpAudioEnabled() {
-        StreamConfig.setTcpAudioEnabled(tcpAudioEnabled)
-        scope.launch {
-            saveTcpAudioEnabled(context, tcpAudioEnabled)
         }
     }
     
@@ -586,6 +554,38 @@ fun SettingWindow(modifier: Modifier = Modifier) {
                 }
             }
         }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // 🔥 TCP 音频配置
+        Text(
+            text = "TCP Audio Configuration:",
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = tcpAudioIp,
+            onValueChange = {
+                tcpAudioIp = it
+                onSaveTcpAudioIp()
+            },
+            label = { Text("Server IP") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = tcpAudioPort,
+            onValueChange = {
+                tcpAudioPort = it
+                onSaveTcpAudioPort()
+            },
+            label = { Text("Server Port") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
     }
 }
 
