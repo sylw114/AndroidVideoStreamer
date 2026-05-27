@@ -32,7 +32,6 @@ class TcpAudioManager {
         // 默认配置
         private const val DEFAULT_SAMPLE_RATE = 48000
         private const val DEFAULT_CHANNELS = 2
-        private const val DEFAULT_BIT_DEPTH = 16 // 16-bit PCM
     }
     
     // 配置参数
@@ -121,13 +120,15 @@ class TcpAudioManager {
         // 🔥 先设置标志，让采集线程自然退出
         isCapturing = false
         
+        // 🔥 立即断开TCP连接（会发送FIN包给服务器）
+        // 这样服务器能立即知道连接已关闭
+        disconnect()
+        
         // 中断采集线程
         captureThread?.interrupt()
-        captureThread?.join(1000)  // 等待线程结束，最多1秒
+        // 🔥 优化：只等待200ms，而不是1秒
+        captureThread?.join(200)
         captureThread = null
-        
-        // 断开TCP连接（会发送FIN包）
-        disconnect()
         
         // 释放AudioRecord
         releaseAudioRecord()
@@ -171,7 +172,7 @@ class TcpAudioManager {
      */
     private fun disconnect() {
         try {
-            // 🔥 先flush确保所有数据发送完毕
+            // 🔥 先flush确保所有缓冲数据立即发送
             outputStream?.flush()
         } catch (e: Exception) {
             Log.w(TAG, "Error flushing output stream: ${e.message}")
@@ -233,9 +234,8 @@ class TcpAudioManager {
         )
         
         outputStream?.write(configPacket)
-        outputStream?.flush()
         
-        Log.d(TAG, "Config sent: sampleRate=${DEFAULT_SAMPLE_RATE}Hz, channels=$DEFAULT_CHANNELS")
+//        Log.d(TAG, "Config sent: sampleRate=${DEFAULT_SAMPLE_RATE}Hz, channels=$DEFAULT_CHANNELS")
     }
     
     /**
@@ -244,7 +244,7 @@ class TcpAudioManager {
     @Suppress("MissingPermission")
     private fun startAudioCapture(audioConfig: AudioPlaybackCaptureConfiguration?) {
         if (audioConfig == null) {
-            Log.e(TAG, "AudioPlaybackCaptureConfiguration is null")
+//            Log.e(TAG, "AudioPlaybackCaptureConfiguration is null")
             onError?.invoke("音频配置为空")
             return
         }
@@ -257,15 +257,19 @@ class TcpAudioManager {
         }
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
         
-        // 计算缓冲区大小
+        // 🔥 关键优化：使用最小缓冲区以降低延迟
         val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
         if (minBufferSize <= 0) {
-//            Log.e(TAG, "Invalid buffer size: $minBufferSize")
             onError?.invoke("无效的缓冲区大小")
             return
         }
-
-        //        Log.d(TAG, "Audio config: sampleRate=$sampleRate, channels=$DEFAULT_CHANNELS, bufferSize=$bufferSize")
+        
+        // 🔥 使用最小缓冲区（而不是2倍），降低采集延迟
+        // 对于48kHz立体声16bit，minBufferSize通常是4096-8192字节
+        // 对应约42-85ms的音频数据
+        val bufferSize = minBufferSize
+        
+//        Log.d(TAG, "Audio config: sampleRate=$sampleRate, channels=$DEFAULT_CHANNELS, bufferSize=${bufferSize}B (${bufferSize * 1000L / (sampleRate * DEFAULT_CHANNELS * 2)}ms)")
         
         try {
             // 🔥 关键：创建独立的AudioRecord实例，不依赖MediaProjectionService的共享实例
@@ -277,7 +281,7 @@ class TcpAudioManager {
                         .setChannelMask(channelConfig)
                         .build()
                 )
-                .setBufferSizeInBytes(minBufferSize)
+                .setBufferSizeInBytes(bufferSize)
                 .setAudioPlaybackCaptureConfig(audioConfig)
                 .build()
             
@@ -294,7 +298,7 @@ class TcpAudioManager {
             
             // 启动采集线程
             captureThread = Thread({
-                audioCaptureLoop(minBufferSize)
+                audioCaptureLoop(bufferSize)
             }, "TcpAudioCaptureThread")
             captureThread?.start()
             
@@ -314,8 +318,7 @@ class TcpAudioManager {
         val buffer = ByteArray(bufferSize)
         var totalBytesSent = 0L
         var packetCount = 0L
-        
-        Log.d(TAG, "Audio capture loop started")
+
         
         while (isCapturing && !Thread.interrupted() && isConnected) {
             try {
@@ -324,26 +327,23 @@ class TcpAudioManager {
                 if (bytesRead > 0) {
                     // 🔥 关键修复：立即复制PCM数据，避免与录屏侧争夺缓冲区
                     val pcmData = buffer.copyOf(bytesRead)
-                    
-                    // 直接发送PCM数据到TCP流（无包头）
+
+                    // 🔥 直接发送PCM数据到TCP流（无包头）
                     outputStream?.write(pcmData)
-                    outputStream?.flush()  // 🔥 立即flush，确保低延迟
+                    outputStream?.flush()
                     
                     totalBytesSent += bytesRead
                     packetCount++
-                    
-                    // 每100包打印一次日志
-                    if (packetCount % 100 == 0L) {
-                        Log.d(TAG, "Sent $packetCount packets, ${totalBytesSent / 1024} KB")
-                    }
+
                 } else if (bytesRead < 0) {
-                    Log.e(TAG, "AudioRecord read error: $bytesRead")
+//                    Log.e(TAG, "AudioRecord read error: $bytesRead")
                     break
                 } else {
-                    // bytesRead == 0，短暂休眠
-                    Thread.sleep(5)
+                    // 🔥 优化：bytesRead == 0时不休眠，立即重试以降低延迟
+                    // Thread.yield() 让出CPU但不休眠
+                    Thread.yield()
                 }
-                
+
             } catch (e: InterruptedException) {
                 Log.d(TAG, "Capture thread interrupted")
                 break
@@ -359,7 +359,6 @@ class TcpAudioManager {
             }
         }
         
-        Log.d(TAG, "Audio capture loop finished. Total: $packetCount packets, ${totalBytesSent / 1024} KB")
     }
     
     /**
