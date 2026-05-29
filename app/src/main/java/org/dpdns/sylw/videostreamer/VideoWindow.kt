@@ -7,7 +7,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
-import android.graphics.SurfaceTexture
 import android.media.projection.MediaProjectionManager
 import android.os.IBinder
 import android.util.DisplayMetrics
@@ -16,7 +15,6 @@ import android.view.TextureView
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -27,15 +25,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
-import org.dpdns.sylw.videostreamer.tcpAudio.TcpAudioManager
-import kotlin.math.abs
+import org.dpdns.sylw.videostreamer.tcpAudio.UdpAudioManager
 
 
 // 视频窗口
@@ -49,9 +44,11 @@ fun VideoWindow(modifier: Modifier = Modifier) {
     var streamManager by remember { mutableStateOf<StreamManager?>(null) }
     var isStreaming by remember { mutableStateOf(false) }
     
-    // 🔥 TCP音频管理器
-    var tcpAudioManager by remember { mutableStateOf<TcpAudioManager?>(null) }
-    var isTcpAudioStreaming by remember { mutableStateOf(false) }
+    // 🔥 TCP音频管理器 (已移除)
+    // var tcpAudioManager by remember { mutableStateOf<TcpAudioManager?>(null) }
+    var udpAudioManager by remember { mutableStateOf<UdpAudioManager?>(null) }
+    var isUdpAudioStreaming by remember { mutableStateOf(false) }
+    var currentLatency by remember { mutableStateOf<Pair<Long, Long>>(Pair(0L, 0L)) }
     
     // 从全局配置读取推流 URL（使用可变状态）
     var currentRtmpUrl by remember { mutableStateOf<String?>(null) }
@@ -194,14 +191,16 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             videoQuality = savedQuality
         )
         
-        // 🔥 初始化TCP音频管理器
-        tcpAudioManager = TcpAudioManager().apply {
+        // 🔥 初始化TCP音频管理器 (改为使用新的双重协议 UDPAudioManager，TCPManager 已移除)
+        // tcpAudioManager = TcpAudioManager().apply { ... }
+        
+        // 🔥 初始化UDP音频管理器
+        udpAudioManager = UdpAudioManager().apply {
             onConnectionStateChanged = { connected ->
-                isTcpAudioStreaming = connected
-//                android.util.Log.d("VideoWindow", "TCP audio connection state: $connected")
+                isUdpAudioStreaming = connected
             }
-            onError = { error ->
-//                android.util.Log.e("VideoWindow", "TCP audio error: $error")
+            onLatencyUpdated = { min, max ->
+                currentLatency = Pair(min, max)
             }
         }
         
@@ -209,9 +208,12 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             streamManager?.release()
             streamManager = null
             
-            // 🔥 释放TCP音频管理器
-            tcpAudioManager?.release()
-            tcpAudioManager = null
+            // 🔥 释放音频管理器
+            // 🔥 移除 tcpAudioManager 引用
+            // tcpAudioManager?.release()
+            // tcpAudioManager = null
+            udpAudioManager?.release()
+            udpAudioManager = null
         }
     }
 
@@ -475,42 +477,38 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             }
         }
         
-        // 🔥 TCP音频控制按钮
+        // 🔥 音频控制按钮
         Row(
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
                 onClick = {
-                    if (isTcpAudioStreaming) {
-                        // 停止TCP音频
-                        tcpAudioManager?.stop()
+                    if (isUdpAudioStreaming) {
+                        udpAudioManager?.stop()
                     } else {
-                        // 启动TCP音频
                         scope.launch {
-                            val ip = loadTcpAudioIp(context)
-                            val port = loadTcpAudioPort(context)
+                            val ip = loadUdpAudioIp(context)
+                            val tcpPort = loadUdpAudioTcpPort(context)
+                            val udpPort = loadUdpAudioUdpPort(context)
                             mediaProjectionService?.let { binder ->
                                 val config = binder.getService().config
-                                
-                                // 🔥 设置为独立TCP音频模式（旋转时不暂停）
                                 binder.setAudioCaptureMode(isVideoPush = false)
-                                tcpAudioManager?.updateConfig(ip, port, true)
-                                tcpAudioManager?.start(config)
-    //                            android.util.Log.d("VideoWindow", "Starting TCP audio to $ip:$port")
+                                udpAudioManager?.updateConfig(ip, tcpPort, udpPort, true)
+                                udpAudioManager?.start(config)
                             }
                         }
                     }
                 },
                 modifier = Modifier.weight(1f),
                 enabled = isAuthorized,
-                colors = if (isTcpAudioStreaming) {
-                    ButtonDefaults.buttonColors(containerColor = Color(0xFF4CAF50))
+                colors = if (isUdpAudioStreaming) {
+                    ButtonDefaults.buttonColors(containerColor = Color(0xFF2196F3))
                 } else {
                     ButtonDefaults.buttonColors()
                 }
             ) {
-                Text(if (isTcpAudioStreaming) "停止TCP音频" else "开始TCP音频")
+                Text(if (isUdpAudioStreaming) "停止音频 (Lat: ${currentLatency.first}-${currentLatency.second}ms)" else "开始音频")
             }
         }
     }

@@ -31,7 +31,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
@@ -55,7 +54,8 @@ private val PREF_VIDEO_MODE = stringPreferencesKey("video_mode")
 private val PREF_VIDEO_QUALITY = intPreferencesKey("video_quality")
 // 🔥 TCP音频配置
 private val PREF_TCP_AUDIO_IP = stringPreferencesKey("tcp_audio_ip")
-private val PREF_TCP_AUDIO_PORT = intPreferencesKey("tcp_audio_port")
+private val PREF_TCP_AUDIO_TCP_PORT = intPreferencesKey("tcp_audio_tcp_port")
+private val PREF_TCP_AUDIO_UDP_PORT = intPreferencesKey("tcp_audio_udp_port")
 
 /**
  * 全局推流配置管理器
@@ -100,17 +100,21 @@ object StreamConfig {
         _videoQuality = quality
     }
     
-    // 🔥 TCP音频配置访问方法
     private var _tcpAudioIp: String? = null
-    private var _tcpAudioPort: Int? = null
+    private var _tcpAudioTcpPort: Int? = null
+    private var _tcpAudioUdpPort: Int? = null
     
     fun getTcpAudioIp(): String? = _tcpAudioIp
     fun setTcpAudioIp(ip: String?) {
         _tcpAudioIp = ip
     }
-    fun getTcpAudioPort(): Int? = _tcpAudioPort
-    fun setTcpAudioPort(port: Int?) {
-        _tcpAudioPort = port
+    fun getTcpAudioTcpPort(): Int? = _tcpAudioTcpPort
+    fun setTcpAudioTcpPort(port: Int?) {
+        _tcpAudioTcpPort = port
+    }
+    fun getTcpAudioUdpPort(): Int? = _tcpAudioUdpPort
+    fun setTcpAudioUdpPort(port: Int?) {
+        _tcpAudioUdpPort = port
     }
 }
 
@@ -192,21 +196,33 @@ suspend fun saveTcpAudioIp(context: Context, ip: String) {
     }
 }
 
-suspend fun loadTcpAudioIp(context: Context): String {
+suspend fun loadUdpAudioIp(context: Context): String {
     return context.dataStore.data.map { preferences ->
         preferences[PREF_TCP_AUDIO_IP] ?: "127.0.0.1"
     }.first()
 }
 
-suspend fun saveTcpAudioPort(context: Context, port: Int) {
+suspend fun saveTcpAudioTcpPort(context: Context, port: Int) {
     context.dataStore.edit { settings ->
-        settings[PREF_TCP_AUDIO_PORT] = port
+        settings[PREF_TCP_AUDIO_TCP_PORT] = port
     }
 }
 
-suspend fun loadTcpAudioPort(context: Context): Int {
+suspend fun loadUdpAudioTcpPort(context: Context): Int {
     return context.dataStore.data.map { preferences ->
-        preferences[PREF_TCP_AUDIO_PORT] ?: 9999
+        preferences[PREF_TCP_AUDIO_TCP_PORT] ?: 9998
+    }.first()
+}
+
+suspend fun saveTcpAudioUdpPort(context: Context, port: Int) {
+    context.dataStore.edit { settings ->
+        settings[PREF_TCP_AUDIO_UDP_PORT] = port
+    }
+}
+
+suspend fun loadUdpAudioUdpPort(context: Context): Int {
+    return context.dataStore.data.map { preferences ->
+        preferences[PREF_TCP_AUDIO_UDP_PORT] ?: 9999
     }.first()
 }
 
@@ -232,7 +248,8 @@ fun SettingWindow(modifier: Modifier = Modifier) {
     
     // 🔥 TCP音频配置
     var tcpAudioIp by remember { mutableStateOf("127.0.0.1") }
-    var tcpAudioPort by remember { mutableStateOf("9999") }
+    var tcpAudioTcpPort by remember { mutableStateOf("9998") }
+    var tcpAudioUdpPort by remember { mutableStateOf("9999") }
     
     // 可选的帧率档位
     val availableFrameRates = listOf(30, 60, 120, 144, 165)
@@ -274,13 +291,17 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         videoQuality = savedQuality
         
         // 🔥 加载TCP音频配置
-        val savedTcpAudioIp = loadTcpAudioIp(context)
+        val savedTcpAudioIp = loadUdpAudioIp(context)
         StreamConfig.setTcpAudioIp(savedTcpAudioIp)
         tcpAudioIp = savedTcpAudioIp
         
-        val savedTcpAudioPort = loadTcpAudioPort(context)
-        StreamConfig.setTcpAudioPort(savedTcpAudioPort)
-        tcpAudioPort = savedTcpAudioPort.toString()
+        val savedTcpAudioTcpPort = loadUdpAudioTcpPort(context)
+        StreamConfig.setTcpAudioTcpPort(savedTcpAudioTcpPort)
+        tcpAudioTcpPort = savedTcpAudioTcpPort.toString()
+
+        val savedTcpAudioUdpPort = loadUdpAudioUdpPort(context)
+        StreamConfig.setTcpAudioUdpPort(savedTcpAudioUdpPort)
+        tcpAudioUdpPort = savedTcpAudioUdpPort.toString()
     }
 
     fun onSaveUrl() {
@@ -332,12 +353,22 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         }
     }
     
-    fun onSaveTcpAudioPort() {
-        val port = tcpAudioPort.toIntOrNull()
+    fun onSaveTcpAudioTcpPort() {
+        val port = tcpAudioTcpPort.toIntOrNull()
         if (port != null && port in 1..65535) {
-            StreamConfig.setTcpAudioPort(port)
+            StreamConfig.setTcpAudioTcpPort(port)
             scope.launch {
-                saveTcpAudioPort(context, port)
+                saveTcpAudioTcpPort(context, port)
+            }
+        }
+    }
+    
+    fun onSaveTcpAudioUdpPort() {
+        val port = tcpAudioUdpPort.toIntOrNull()
+        if (port != null && port in 1..65535) {
+            StreamConfig.setTcpAudioUdpPort(port)
+            scope.launch {
+                saveTcpAudioUdpPort(context, port)
             }
         }
     }
@@ -577,12 +608,24 @@ fun SettingWindow(modifier: Modifier = Modifier) {
 
         Spacer(modifier = Modifier.height(8.dp))
         OutlinedTextField(
-            value = tcpAudioPort,
+            value = tcpAudioTcpPort,
             onValueChange = {
-                tcpAudioPort = it
-                onSaveTcpAudioPort()
+                tcpAudioTcpPort = it
+                onSaveTcpAudioTcpPort()
             },
-            label = { Text("Server Port") },
+            label = { Text("TCP Control Port") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+        OutlinedTextField(
+            value = tcpAudioUdpPort,
+            onValueChange = {
+                tcpAudioUdpPort = it
+                onSaveTcpAudioUdpPort()
+            },
+            label = { Text("UDP Data Port") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
