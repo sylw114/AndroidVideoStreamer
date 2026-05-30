@@ -15,17 +15,13 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.tooling.preview.Preview
 import kotlinx.coroutines.launch
 import org.dpdns.sylw.videostreamer.ui.theme.VideoStreamerTheme
-
-interface streamToUrl {
-    fun changeUrl(url: String)
-    fun updateBitrate(bitrate: Int)
-    fun updateFrameRate(frameRate: Int)
-}
 
 
 class MainActivity : ComponentActivity() {
@@ -72,6 +68,11 @@ fun WindowForSelecting(modifier: Modifier = Modifier) {
             state = pagerState,
             modifier = Modifier.fillMaxSize()
         ) { page ->
+
+            val focusManager = LocalFocusManager.current
+            LaunchedEffect(pagerState.currentPage) {
+                focusManager.clearFocus()
+            }
 
             when (page) {
                 0 -> SettingWindow()
