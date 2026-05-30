@@ -20,8 +20,6 @@ class UdpAudioManager {
 
     companion object {
         private const val TAG = "UdpAudioManager"
-        private const val DEFAULT_SAMPLE_RATE = 48000
-        private const val DEFAULT_CHANNELS = 2
     }
 
     private var serverIp: String = ""
@@ -46,6 +44,9 @@ class UdpAudioManager {
 
     private var sequenceNumber: Int = 1
     private val packetTimestampMap = LongArray(256) // 存储每个序号的发送时间
+
+    private var currentSampleRate: Int = 48000
+    private var currentChannelConfig: Int = AudioFormat.CHANNEL_IN_STEREO
 
     fun updateConfig(ip: String, tcpPort: Int, udpPort: Int, enabled: Boolean) {
         this.serverIp = ip
@@ -101,6 +102,8 @@ class UdpAudioManager {
                 startTcpControlLoop()
                 
                 // 4. 发送握手包
+                // 🔥 在握手前计算音频配置，确保发送的是真实支持的配置
+                resolveAudioConfig()
                 sendHandshake()
                 
                 onConnectionStateChanged?.invoke(true)
@@ -113,9 +116,28 @@ class UdpAudioManager {
         }
     }
 
+    private fun resolveAudioConfig() {
+        val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+        val formats = listOf(
+            Pair(48000, AudioFormat.CHANNEL_IN_STEREO),
+            Pair(44100, AudioFormat.CHANNEL_IN_STEREO),
+            Pair(48000, AudioFormat.CHANNEL_IN_MONO),
+            Pair(44100, AudioFormat.CHANNEL_IN_MONO)
+        )
+        
+        for (f in formats) {
+            val size = AudioRecord.getMinBufferSize(f.first, f.second, audioFormat)
+            if (size > 0) {
+                currentSampleRate = f.first
+                currentChannelConfig = f.second
+                return
+            }
+        }
+    }
+
     private fun sendHandshake() {
-        val sampleRateIndex = if (DEFAULT_SAMPLE_RATE == 48000) 0x01.toByte() else 0x00.toByte()
-        val channels = if (DEFAULT_CHANNELS == 2) 0x02.toByte() else 0x01.toByte()
+        val sampleRateIndex = if (currentSampleRate == 48000) 0x01.toByte() else 0x00.toByte()
+        val channels = if (currentChannelConfig == AudioFormat.CHANNEL_IN_STEREO) 0x02.toByte() else 0x01.toByte()
         
         // [SampleRateIdx][Channels]
         val handshake = byteArrayOf(sampleRateIndex, channels)
@@ -153,14 +175,15 @@ class UdpAudioManager {
     private fun startAudioCapture(audioConfig: AudioPlaybackCaptureConfiguration?) {
         if (audioConfig == null) return
 
-        val sampleRate = DEFAULT_SAMPLE_RATE
-        val channelConfig = if (DEFAULT_CHANNELS == 2) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
-        val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-        val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-        val bufferSize = minBufferSize
+        val bufferSize = AudioRecord.getMinBufferSize(currentSampleRate, currentChannelConfig, AudioFormat.ENCODING_PCM_16BIT)
+        if (bufferSize <= 0) return
 
         audioRecord = AudioRecord.Builder()
-            .setAudioFormat(AudioFormat.Builder().setEncoding(audioFormat).setSampleRate(sampleRate).setChannelMask(channelConfig).build())
+            .setAudioFormat(AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(currentSampleRate)
+                .setChannelMask(currentChannelConfig)
+                .build())
             .setBufferSizeInBytes(bufferSize)
             .setAudioPlaybackCaptureConfig(audioConfig)
             .build()
@@ -221,7 +244,7 @@ class UdpAudioManager {
                         val maxLatency = now - serverRecvTime - temp
                         Log.d(TAG, "Latency Update - Seq: $seq, Min: ${minLatency}ms, Max: ${maxLatency}ms, hbSendTimestamp: $hbSendTimestamp, now: $now, serverRecvTime: $serverRecvTime, packetTimestamp: $packetTimestamp, clientSentTimeOriginal: $clientSentTimeOriginal, minAdd: $minAdd, maxAdd: $maxAdd")
                         
-                        onLatencyUpdated?.invoke(maxOf(0, minLatency), maxOf(0, maxLatency))
+                        onLatencyUpdated?.invoke(maxOf(0L, minLatency), maxOf(0L, maxLatency))
                     } else if (bytesRead == -1) {
                         break
                     }

@@ -437,15 +437,37 @@ class MediaProjectionService : Service() {
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
         
         // 获取最小缓冲区大小，并设置为 2 倍以保证稳定性
-        val minBufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
-        if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
-//            android.util.Log.e("MediaProj", "❌ Invalid buffer size: $minBufferSize")
+        var minBufferSize: Int? = null
+        
+        // 🔥 失败处理策略：尝试降低采样率 -> 单声道 -> 两个都改
+        val formats = listOf(
+            Pair(sampleRate, channelConfig),
+            Pair(44100, channelConfig),
+            Pair(48000, AudioFormat.CHANNEL_IN_MONO),
+            Pair(44100, AudioFormat.CHANNEL_IN_MONO)
+        )
+        
+        var currentSampleRate = sampleRate
+        var currentChannelConfig = channelConfig
+        
+        for (f in formats) {
+            val size = AudioRecord.getMinBufferSize(f.first, f.second, audioFormat)
+            if (size > 0) {
+                currentSampleRate = f.first
+                currentChannelConfig = f.second
+                minBufferSize = size
+                break
+            }
+        }
+
+        if (minBufferSize == null) {
+            android.util.Log.e("MediaProj", "❌ Could not find valid audio configuration")
             return
         }
         
         // 🔥 关键修复：将 bufferSize 保存为全局变量，作为单个 PCM 包大小
         audioPacketSize = minBufferSize
-//        android.util.Log.d("AudioCapture", "📊 Audio config: ${sampleRate}Hz, stereo, 16-bit")
+//        android.util.Log.d("AudioCapture", "📊 Audio config: ${currentSampleRate}Hz, ${if(currentChannelConfig == AudioFormat.CHANNEL_IN_STEREO) "stereo" else "mono"}, 16-bit")
 //        android.util.Log.d("AudioCapture", "   Min buffer: $minBufferSize, Using buffer: $audioPacketSize bytes")
         
         // 🔥 初始化环形缓冲区和读取缓冲区（使用全局的 audioPacketSize）
@@ -457,8 +479,8 @@ class MediaProjectionService : Service() {
                 .setAudioFormat(
                     AudioFormat.Builder()
                         .setEncoding(audioFormat)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(channelConfig)
+                        .setSampleRate(currentSampleRate)
+                        .setChannelMask(currentChannelConfig)
                         .build()
                 )
                 .setBufferSizeInBytes(audioPacketSize)
