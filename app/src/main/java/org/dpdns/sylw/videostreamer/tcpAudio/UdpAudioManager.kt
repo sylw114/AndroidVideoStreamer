@@ -42,7 +42,7 @@ class UdpAudioManager {
     var onError: ((String) -> Unit)? = null
     var onLatencyUpdated: ((Long, Long) -> Unit)? = null // (min, max) latency
 
-    private var sequenceNumber: Int = 1
+    private var sequenceNumber: UByte = 0u
     private val packetTimestampMap = LongArray(256) // 存储每个序号的发送时间
 
     private var currentSampleRate: Int = 48000
@@ -195,7 +195,7 @@ class UdpAudioManager {
 
         audioRecord?.startRecording()
         isCapturing = true
-        sequenceNumber = 1 
+        sequenceNumber = 0u
         captureThread = Thread({ audioCaptureLoop(bufferSize) }, "UdpAudioCaptureThread")
         captureThread?.start()
     }
@@ -275,12 +275,12 @@ class UdpAudioManager {
                         // 每个分片携带 Seq 和 数据
                         val packetData = ByteArray(chunkSize + 1)
                         
-                        packetTimestampMap[sequenceNumber] = System.currentTimeMillis()
+                        packetTimestampMap[sequenceNumber.toInt()] = System.currentTimeMillis()
                         packetData[0] = sequenceNumber.toByte()
                         System.arraycopy(buffer, offset, packetData, 1, chunkSize)
 
                         // 循环递增序号，范围 0x00 - 0xFF
-                        sequenceNumber = (sequenceNumber + 1) % 256
+                        sequenceNumber ++
 
                         repeat(3) {
                             val packet = DatagramPacket(packetData, packetData.size, serverAddress, udpPort)
