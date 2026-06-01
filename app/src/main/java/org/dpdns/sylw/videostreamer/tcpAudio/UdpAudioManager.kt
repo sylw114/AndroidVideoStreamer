@@ -26,6 +26,7 @@ class UdpAudioManager {
     private var tcpPort: Int = 0
     private var udpPort: Int = 0
     private var isEnabled: Boolean = false
+    private var isRedundantTransmissionEnabled: Boolean = false // 新增
 
     private var audioRecord: AudioRecord? = null
     private var captureThread: Thread? = null
@@ -48,11 +49,12 @@ class UdpAudioManager {
     private var currentSampleRate: Int = 48000
     private var currentChannelConfig: Int = AudioFormat.CHANNEL_IN_STEREO
 
-    fun updateConfig(ip: String, tcpPort: Int, udpPort: Int, enabled: Boolean) {
+    fun updateConfig(ip: String, tcpPort: Int, udpPort: Int, enabled: Boolean, redundantTransmission: Boolean = false) {
         this.serverIp = ip
         this.tcpPort = tcpPort
         this.udpPort = udpPort
         this.isEnabled = enabled
+        this.isRedundantTransmissionEnabled = redundantTransmission
         if (!enabled) stop()
     }
 
@@ -282,7 +284,8 @@ class UdpAudioManager {
                         // 循环递增序号，范围 0x00 - 0xFF
                         sequenceNumber ++
 
-                        repeat(3) {
+                        val repeatCount = if (isRedundantTransmissionEnabled) 3 else 1
+                        repeat(repeatCount) {
                             val packet = DatagramPacket(packetData, packetData.size, serverAddress, udpPort)
                             udpSocket?.send(packet)
                         }

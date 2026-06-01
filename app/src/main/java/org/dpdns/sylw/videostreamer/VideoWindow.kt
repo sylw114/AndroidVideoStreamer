@@ -489,7 +489,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     } else {
                         scope.launch {
                             val ip = loadUdpAudioIp(context)
-                            val tcpPort = loadUdpAudioTcpPort(context)
+                            val tcpPort = loadTcpControlPort(context)
                             val udpPort = loadUdpAudioUdpPort(context)
                             mediaProjectionService?.let { binder ->
                                 val config = binder.getService().config
