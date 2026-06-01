@@ -5,11 +5,12 @@ import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.util.Log
 import kotlinx.coroutines.*
+import org.dpdns.sylw.videostreamer.StreamConfig
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import kotlin.math.max
-import kotlin.math.min
+//import kotlin.math.max
+//import kotlin.math.min
 
 /**
  * 低延迟UDP音频流管理器
@@ -26,7 +27,7 @@ class UdpAudioManager {
     private var tcpPort: Int = 0
     private var udpPort: Int = 0
     private var isEnabled: Boolean = false
-    private var isRedundantTransmissionEnabled: Boolean = false // 新增
+    private var isRedundantTransmissionEnabled: Boolean = StreamConfig.getUdpAudioRedundant() ?: false // 新增
 
     private var audioRecord: AudioRecord? = null
     private var captureThread: Thread? = null
@@ -49,7 +50,7 @@ class UdpAudioManager {
     private var currentSampleRate: Int = 48000
     private var currentChannelConfig: Int = AudioFormat.CHANNEL_IN_STEREO
 
-    fun updateConfig(ip: String, tcpPort: Int, udpPort: Int, enabled: Boolean, redundantTransmission: Boolean = false) {
+    fun updateConfig(ip: String, tcpPort: Int, udpPort: Int, enabled: Boolean, redundantTransmission: Boolean = StreamConfig.getUdpAudioRedundant() ?: false) {
         this.serverIp = ip
         this.tcpPort = tcpPort
         this.udpPort = udpPort
