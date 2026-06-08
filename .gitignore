@@ -79,3 +79,6 @@ key.properties
 # Gradle wrapper
 !gradle/wrapper/gradle-wrapper.jar
 !gradle/wrapper/gradle-wrapper.properties
+
+# AI agent guidance
+AGENTS.md
