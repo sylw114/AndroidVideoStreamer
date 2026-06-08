@@ -30,7 +30,7 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
-import org.dpdns.sylw.videostreamer.tcpAudio.UdpAudioManager
+import org.dpdns.sylw.videostreamer.udpAudio.UdpAudioManager
 
 
 // 视频窗口
@@ -48,7 +48,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
     // var tcpAudioManager by remember { mutableStateOf<TcpAudioManager?>(null) }
     var udpAudioManager by remember { mutableStateOf<UdpAudioManager?>(null) }
     var isUdpAudioStreaming by remember { mutableStateOf(false) }
-    var currentLatency by remember { mutableStateOf<Pair<Long, Long>>(Pair(0L, 0L)) }
+    var currentLatency by remember { mutableStateOf<Pair<Long, Long>?>(null) }
     
     // 从全局配置读取推流 URL（使用可变状态）
     var currentRtmpUrl by remember { mutableStateOf<String?>(null) }
@@ -103,6 +103,26 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 //                android.util.Log.d("VideoWindow", "onServiceDisconnected called")
                 mediaProjectionService = null
             }
+        }
+    }
+
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/plain")
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            try {
+                val logFile = udpAudioManager?.getLatencyLogFile()
+                if (logFile != null && logFile.exists()) {
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        logFile.inputStream().use { it.copyTo(out) }
+                    }
+                } else {
+                    context.contentResolver.openOutputStream(uri)?.use {
+                        it.write("暂无延迟记录".toByteArray())
+                    }
+                }
+            } catch (_: Exception) {}
         }
     }
 
@@ -198,6 +218,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
         udpAudioManager = UdpAudioManager().apply {
             onConnectionStateChanged = { connected ->
                 isUdpAudioStreaming = connected
+                if (!connected) currentLatency = null
             }
             onLatencyUpdated = { min, max ->
                 currentLatency = Pair(min, max)
@@ -495,7 +516,8 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                 val config = binder.getService().config
                                 binder.setAudioCaptureMode(isVideoPush = false)
                                 udpAudioManager?.updateConfig(ip, tcpPort, udpPort, true)
-                                udpAudioManager?.start(config)
+                                val logFile = java.io.File(context.filesDir, "latency_log.txt")
+                                udpAudioManager?.start(config, logFile)
                             }
                         }
                     }
@@ -508,7 +530,16 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     ButtonDefaults.buttonColors()
                 }
             ) {
-                Text(if (isUdpAudioStreaming) "停止音频 (Lat: ${currentLatency.first}-${currentLatency.second}ms)" else "开始音频")
+                val latText = currentLatency?.let { "${it.first}-${it.second}ms" } ?: "--"
+                Text(if (isUdpAudioStreaming) "停止音频 (Lat: $latText)" else "开始音频")
+            }
+            Button(
+                onClick = {
+                    exportLauncher.launch("latency_${System.currentTimeMillis()}.txt")
+                },
+                enabled = isUdpAudioStreaming || (udpAudioManager?.getLatencyLogFile()?.exists() == true)
+            ) {
+                Text("导出延迟")
             }
         }
     }

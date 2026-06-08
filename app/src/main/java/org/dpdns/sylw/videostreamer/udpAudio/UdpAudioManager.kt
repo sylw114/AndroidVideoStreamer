@@ -1,4 +1,4 @@
-package org.dpdns.sylw.videostreamer.tcpAudio
+package org.dpdns.sylw.videostreamer.udpAudio
 
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
@@ -6,11 +6,10 @@ import android.media.AudioRecord
 import android.util.Log
 import kotlinx.coroutines.*
 import org.dpdns.sylw.videostreamer.StreamConfig
+import java.io.File
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-//import kotlin.math.max
-//import kotlin.math.min
 
 /**
  * 低延迟UDP音频流管理器
@@ -21,13 +20,16 @@ class UdpAudioManager {
 
     companion object {
         private const val TAG = "UdpAudioManager"
+        private const val LATENCY_INVALID_THRESHOLD = -20L // ms
     }
+
+    data class LatencyRecord(val seq: Int, val minLatency: Long, val maxLatency: Long)
 
     private var serverIp: String = ""
     private var tcpPort: Int = 0
     private var udpPort: Int = 0
     private var isEnabled: Boolean = false
-    private var isRedundantTransmissionEnabled: Boolean = StreamConfig.getUdpAudioRedundant() ?: false // 新增
+    private var isRedundantTransmissionEnabled: Boolean = StreamConfig.getUdpAudioRedundant() ?: false
 
     private var audioRecord: AudioRecord? = null
     private var captureThread: Thread? = null
@@ -42,13 +44,19 @@ class UdpAudioManager {
 
     var onConnectionStateChanged: ((Boolean) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
-    var onLatencyUpdated: ((Long, Long) -> Unit)? = null // (min, max) latency
+    var onLatencyUpdated: ((Long, Long) -> Unit)? = null // (min, max) 最新有效组延迟
 
     private var sequenceNumber: UByte = 0u
     private val packetTimestampMap = LongArray(256) // 存储每个序号的发送时间
 
+    private val latencyRecords = mutableListOf<LatencyRecord>()
+
     private var currentSampleRate: Int = 48000
     private var currentChannelConfig: Int = AudioFormat.CHANNEL_IN_STEREO
+
+    private var latencyLogFile: File? = null
+
+    fun getLatencyLogFile(): File? = latencyLogFile
 
     fun updateConfig(ip: String, tcpPort: Int, udpPort: Int, enabled: Boolean, redundantTransmission: Boolean = StreamConfig.getUdpAudioRedundant() ?: false) {
         this.serverIp = ip
@@ -59,7 +67,7 @@ class UdpAudioManager {
         if (!enabled) stop()
     }
 
-    fun start(audioConfig: AudioPlaybackCaptureConfiguration?) {
+    fun start(audioConfig: AudioPlaybackCaptureConfiguration?, logFile: File? = null) {
         // 🔥 如果之前处于连接状态，强制进行一次探测性清理，防止残留状态
         if (isConnected) {
             val socket = tcpSocket
@@ -72,6 +80,13 @@ class UdpAudioManager {
         }
 
         if (!isEnabled || isCapturing) return
+
+        latencyLogFile = logFile
+        try {
+            logFile?.writeText("包序号\t最小(ms)\t最大(ms)\n")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to init latency log file: ${e.message}")
+        }
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -100,7 +115,10 @@ class UdpAudioManager {
                 }
                 
                 isConnected = true
-                
+                synchronized(latencyRecords) {
+                    latencyRecords.clear()
+                }
+
                 // 3. 启动控制循环
                 startTcpControlLoop()
                 
@@ -207,50 +225,78 @@ class UdpAudioManager {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val inputStream = tcpSocket?.getInputStream() ?: return@launch
-                val buffer = ByteArray(1024)
+                val rawBuffer = ByteArray(4096)
+                val accumulator = java.io.ByteArrayOutputStream()
                 var hbSendTimestamp: Long = 0
-                // 启动心跳发送协程
+
                 val heartbeatJob = launch {
-                    delay(1010) // 1秒一次心跳
+                    delay(1010)
                     while (isConnected) {
                         val timestamp = System.currentTimeMillis()
                         hbSendTimestamp = timestamp
-                        //发送无要求
                         val hb = java.nio.ByteBuffer.allocate(9)
                             .put(0x02.toByte())
                             .putLong(timestamp)
                             .array()
                         tcpOutputStream?.write(hb)
                         tcpOutputStream?.flush()
-                        delay(1000) // 1秒一次心跳
+                        delay(1000)
                     }
                 }
-                var minAdd: Long = Long.MIN_VALUE
-                var maxAdd: Long = Long.MAX_VALUE
 
                 while (isConnected) {
-                    val bytesRead = inputStream.read(buffer)
-                    // 协议回包应包含: [Seq:1][udpPackTimestamp:8][ServerTimestamp:8]
-                    if (bytesRead >= 17) {
-                        val now = System.currentTimeMillis()
-                        val seq = buffer[0].toInt() and 0xFF
-                        val serverRecvTime = java.nio.ByteBuffer.wrap(buffer, 9, 8).long
-                        val packetTimestamp = java.nio.ByteBuffer.wrap(buffer, 1, 8).long
-                        val clientSentTimeOriginal = packetTimestampMap[seq]
-                        val temp = clientSentTimeOriginal - packetTimestamp
-//                        minAdd = max(minAdd, serverRecvTime - now)
-//                        maxAdd = min(maxAdd, serverRecvTime - hbSendTimestamp)
+                    val bytesRead = inputStream.read(rawBuffer)
+                    if (bytesRead == -1) break
+                    accumulator.write(rawBuffer, 0, bytesRead)
 
-//                        val minLatency = -maxAdd - temp
-//                        val maxLatency = -minAdd - temp
-                        val minLatency = hbSendTimestamp - serverRecvTime - temp
-                        val maxLatency = now - serverRecvTime - temp
-                        Log.d(TAG, "Latency Update - Seq: $seq, Min: ${minLatency}ms, Max: ${maxLatency}ms, hbSendTimestamp: $hbSendTimestamp, now: $now, serverRecvTime: $serverRecvTime, packetTimestamp: $packetTimestamp, clientSentTimeOriginal: $clientSentTimeOriginal, minAdd: $minAdd, maxAdd: $maxAdd")
-                        
-                        onLatencyUpdated?.invoke(maxOf(0L, minLatency), maxOf(0L, maxLatency))
-                    } else if (bytesRead == -1) {
-                        break
+                    // 协议格式: [TotalLen:2][Seq:1][udpTs:8]×N + [ServerTs:8]
+                    // TotalLen 大端序，含自身，最小值 10（N=0）
+                    val data = accumulator.toByteArray()
+                    var pos = 0
+                    var lastValidMin = 0L
+                    var lastValidMax = 0L
+                    var hasValidInBatch = false
+                    while (pos < data.size) {
+                        if (data.size - pos < 2) break
+                        val frameLen = ((data[pos].toInt() and 0xFF) shl 8) or (data[pos + 1].toInt() and 0xFF)
+                        if (frameLen < 10) { pos++; continue }
+                        if (data.size - pos < frameLen) break
+                        val now = System.currentTimeMillis()
+                        val serverTs = java.nio.ByteBuffer.wrap(data, pos + frameLen - 8, 8).long
+                        val entryCount = (frameLen - 10) / 9
+
+                        for (i in 0 until entryCount) {
+                            val entryOffset = pos + 2 + i * 9
+                            val seq = data[entryOffset].toInt() and 0xFF
+                            val udpTs = java.nio.ByteBuffer.wrap(data, entryOffset + 1, 8).long
+                            val clientSentTime = packetTimestampMap[seq]
+                            val drift = clientSentTime - udpTs
+                            val minLatency = hbSendTimestamp - serverTs - drift
+                            val maxLatency = now - serverTs - drift
+                            Log.d(TAG, "Seq=$seq min=${minLatency}ms max=${maxLatency}ms serverTs=$serverTs")
+                            if (minLatency >= LATENCY_INVALID_THRESHOLD) {
+                                val clampedMin = maxOf(0L, minLatency)
+                                val clampedMax = maxOf(0L, maxLatency)
+                                val record = LatencyRecord(seq = seq, minLatency = clampedMin, maxLatency = clampedMax)
+                                synchronized(latencyRecords) { latencyRecords.add(record) }
+                                try {
+                                    latencyLogFile?.appendText("${record.seq}\t${record.minLatency}\t${record.maxLatency}\n")
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Failed to write latency record: ${e.message}")
+                                }
+                                lastValidMin = clampedMin
+                                lastValidMax = clampedMax
+                                hasValidInBatch = true
+                            }
+                        }
+
+                        pos += frameLen
                     }
+                    if (hasValidInBatch) {
+                        onLatencyUpdated?.invoke(lastValidMin, lastValidMax)
+                    }
+                    accumulator.reset()
+                    if (pos < data.size) accumulator.write(data, pos, data.size - pos)
                 }
                 heartbeatJob.cancel()
             } catch (e: Exception) {
@@ -258,6 +304,22 @@ class UdpAudioManager {
             }
             if (isConnected) stop()
         }
+    }
+
+    fun getLatencyRecords(): List<LatencyRecord> = synchronized(latencyRecords) { latencyRecords.toList() }
+
+    fun exportLatencyRecords(): String {
+        val records = getLatencyRecords()
+        if (records.isEmpty()) return "暂无延迟记录"
+        val sb = StringBuilder()
+        sb.appendLine("延迟记录 (共${records.size}条)")
+        sb.appendLine("包序号\t最小(ms)\t最大(ms)")
+        records.forEach { sb.appendLine("${it.seq}\t${it.minLatency}\t${it.maxLatency}") }
+        val allMin = records.minOf { it.minLatency }
+        val allMax = records.maxOf { it.maxLatency }
+        sb.appendLine("---")
+        sb.appendLine("全局最小: ${allMin}ms  全局最大: ${allMax}ms")
+        return sb.toString()
     }
 
     private fun audioCaptureLoop(bufferSize: Int) {
