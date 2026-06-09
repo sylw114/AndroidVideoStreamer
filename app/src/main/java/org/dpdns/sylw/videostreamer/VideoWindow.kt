@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -37,8 +38,11 @@ import org.dpdns.sylw.videostreamer.udpAudio.UdpAudioManager
 @Composable
 fun VideoWindow(modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val activity = context.findActivity()
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
+    val noLatencyRecordsText = stringResource(R.string.latency_no_records)
+    val latencyLogHeaderText = stringResource(R.string.latency_log_header)
 
     // 推流管理器
     var streamManager by remember { mutableStateOf<StreamManager?>(null) }
@@ -119,7 +123,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     }
                 } else {
                     context.contentResolver.openOutputStream(uri)?.use {
-                        it.write("暂无延迟记录".toByteArray())
+                        it.write(noLatencyRecordsText.toByteArray())
                     }
                 }
             } catch (_: Exception) {}
@@ -167,74 +171,76 @@ fun VideoWindow(modifier: Modifier = Modifier) {
     }
 
     // 初始化推流管理器并从配置加载参数
-    DisposableEffect(Unit) {
-        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main)
-
-        // 🔥 关键修复：设置全局 streaming 引用，让 SettingWindow 可以访问
-        streamManager = StreamManager(context as Activity).apply {
-            onStreamingStateChanged = { streaming ->
-                isStreaming = streaming
+    DisposableEffect(activity) {
+        if (activity == null) {
+            onDispose {}
+        } else {
+            // 🔥 关键修复：设置全局 streaming 引用，让 SettingWindow 可以访问
+            streamManager = StreamManager(activity).apply {
+                onStreamingStateChanged = { streaming ->
+                    isStreaming = streaming
 //                android.util.Log.d("VideoWindow", "Streaming state changed: $streaming")
-            }
+                }
 
-            onError = { error ->
+                onError = { error ->
 //                android.util.Log.e("VideoWindow", "Stream error: $error")
+                }
             }
-        }
 
-        // 异步加载保存的配置并初始化协议
+            // 异步加载保存的配置并初始化协议
 
-        val savedUrl = StreamConfig.getCurrentUrl()!!
-        currentRtmpUrl = savedUrl  // 更新本地状态
+            val savedUrl = StreamConfig.getCurrentUrl()!!
+            currentRtmpUrl = savedUrl  // 更新本地状态
 //            android.util.Log.d("VideoWindow", "Loaded saved RTMP URL: $savedUrl")
 
-        val savedBitrate = StreamConfig.getVideoBitrate()!!
+            val savedBitrate = StreamConfig.getVideoBitrate()!!
 //            android.util.Log.d("VideoWindow", "Loaded saved bitrate: $savedBitrate")
 
-        val savedFrameRate = StreamConfig.getFrameRate()!!
+            val savedFrameRate = StreamConfig.getFrameRate()!!
 //            android.util.Log.d("VideoWindow", "Loaded saved frame rate: $savedFrameRate")
 
-        val savedProtocol = StreamConfig.getStreamingProtocol()!!
-        val savedMode = StreamConfig.getRateMode() ?: "CBR"
-        val savedQuality = StreamConfig.getCqQuality() ?: 70
+            val savedProtocol = StreamConfig.getStreamingProtocol()!!
+            val savedMode = StreamConfig.getRateMode() ?: "CBR"
+            val savedQuality = StreamConfig.getCqQuality() ?: 70
 
-        // 初始化协议（使用保存的协议）
-        streamManager?.init(savedProtocol)
+            // 初始化协议（使用保存的协议）
+            streamManager?.init(savedProtocol)
 
-        // 设置帧率到 StreamManager
-        streamManager?.setVideoParams(
-            width = 1920,  // 默认宽度，后续会根据屏幕方向调整
-            height = 1080, // 默认高度
-            bitrate = savedBitrate,
-            frameRate = savedFrameRate,
-            videoMode = savedMode,
-            videoQuality = savedQuality
-        )
+            // 设置帧率到 StreamManager
+            streamManager?.setVideoParams(
+                width = 1920,  // 默认宽度，后续会根据屏幕方向调整
+                height = 1080, // 默认高度
+                bitrate = savedBitrate,
+                frameRate = savedFrameRate,
+                videoMode = savedMode,
+                videoQuality = savedQuality
+            )
         
-        // 🔥 初始化TCP音频管理器 (改为使用新的双重协议 UDPAudioManager，TCPManager 已移除)
-        // tcpAudioManager = TcpAudioManager().apply { ... }
+            // 🔥 初始化TCP音频管理器 (改为使用新的双重协议 UDPAudioManager，TCPManager 已移除)
+            // tcpAudioManager = TcpAudioManager().apply { ... }
         
-        // 🔥 初始化UDP音频管理器
-        udpAudioManager = UdpAudioManager().apply {
-            onConnectionStateChanged = { connected ->
-                isUdpAudioStreaming = connected
-                if (!connected) currentLatency = null
+            // 🔥 初始化UDP音频管理器
+            udpAudioManager = UdpAudioManager().apply {
+                onConnectionStateChanged = { connected ->
+                    isUdpAudioStreaming = connected
+                    if (!connected) currentLatency = null
+                }
+                onLatencyUpdated = { min, max ->
+                    currentLatency = Pair(min, max)
+                }
             }
-            onLatencyUpdated = { min, max ->
-                currentLatency = Pair(min, max)
-            }
-        }
         
-        onDispose {
-            streamManager?.release()
-            streamManager = null
+            onDispose {
+                streamManager?.release()
+                streamManager = null
             
-            // 🔥 释放音频管理器
-            // 🔥 移除 tcpAudioManager 引用
-            // tcpAudioManager?.release()
-            // tcpAudioManager = null
-            udpAudioManager?.release()
-            udpAudioManager = null
+                // 🔥 释放音频管理器
+                // 🔥 移除 tcpAudioManager 引用
+                // tcpAudioManager?.release()
+                // tcpAudioManager = null
+                udpAudioManager?.release()
+                udpAudioManager = null
+            }
         }
     }
 
@@ -415,7 +421,13 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     )
                 ) else ButtonDefaults.buttonColors()
             ) {
-                Text(if (isAuthorized) "录屏服务正在运行" else "授权并开启录屏")
+                Text(
+                    if (isAuthorized) {
+                        stringResource(R.string.video_screen_service_running)
+                    } else {
+                        stringResource(R.string.video_authorize_and_start_screen)
+                    }
+                )
             }
             Button(
                 onClick = {
@@ -471,7 +483,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 //                                            android.util.Log.e("VideoWindow", "Failed to start streaming", e)
                                             // 在主线程显示错误
                                             withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                                manager.onError?.invoke("启动推流失败：${e.message}")
+                                                manager.onError?.invoke(context.getString(R.string.error_start_stream_failed, e.message ?: ""))
                                             }
                                         }
                                     }
@@ -494,7 +506,13 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     ButtonDefaults.buttonColors()
                 }
             ) {
-                Text(if (isStreaming) "停止推流" else "开始推流")
+                Text(
+                    if (isStreaming) {
+                        stringResource(R.string.video_stop_streaming)
+                    } else {
+                        stringResource(R.string.video_start_streaming)
+                    }
+                )
             }
         }
         
@@ -518,7 +536,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                 udpAudioManager?.updateConfig(ip, tcpPort, udpPort, true)
                                 val recordEnabled = StreamConfig.getLatencyRecordingEnabled() ?: false
                                 val logFile = if (recordEnabled) java.io.File(context.filesDir, "latency_log.txt") else null
-                                udpAudioManager?.start(config, logFile, recordEnabled)
+                                udpAudioManager?.start(config, logFile, recordEnabled, latencyLogHeaderText)
                             }
                         }
                     }
@@ -532,7 +550,13 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 }
             ) {
                 val latText = currentLatency?.let { "${it.first}-${it.second}ms" } ?: "--"
-                Text(if (isUdpAudioStreaming) "停止音频 (Lat: $latText)" else "开始音频")
+                Text(
+                    if (isUdpAudioStreaming) {
+                        stringResource(R.string.video_stop_audio_with_latency, latText)
+                    } else {
+                        stringResource(R.string.video_start_audio)
+                    }
+                )
             }
             Button(
                 onClick = {
@@ -541,7 +565,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 enabled = (StreamConfig.getLatencyRecordingEnabled() == true) &&
                         (isUdpAudioStreaming || (udpAudioManager?.getLatencyLogFile()?.exists() == true))
             ) {
-                Text("导出延迟")
+                Text(stringResource(R.string.video_export_latency))
             }
         }
     }

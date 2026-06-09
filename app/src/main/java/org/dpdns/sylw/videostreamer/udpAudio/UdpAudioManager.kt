@@ -68,7 +68,12 @@ class UdpAudioManager {
         if (!enabled) stop()
     }
 
-    fun start(audioConfig: AudioPlaybackCaptureConfiguration?, logFile: File? = null, recordEnabled: Boolean = false) {
+    fun start(
+        audioConfig: AudioPlaybackCaptureConfiguration?,
+        logFile: File? = null,
+        recordEnabled: Boolean = false,
+        latencyLogHeader: String = "包序号\t最小(ms)\t最大(ms)\n"
+    ) {
         // 🔥 如果之前处于连接状态，强制进行一次探测性清理，防止残留状态
         if (isConnected) {
             val socket = tcpSocket
@@ -85,7 +90,7 @@ class UdpAudioManager {
         latencyLogFile = if (recordEnabled) logFile else null
         this.recordEnabled = recordEnabled
         try {
-            if (recordEnabled) logFile?.writeText("包序号\t最小(ms)\t最大(ms)\n")
+            if (recordEnabled) logFile?.writeText(latencyLogHeader)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to init latency log file: ${e.message}")
         }

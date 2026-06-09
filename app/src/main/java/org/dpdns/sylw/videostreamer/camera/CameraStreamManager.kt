@@ -13,6 +13,7 @@ import android.util.Log
 import android.util.Size
 import android.view.Surface
 import androidx.annotation.RequiresPermission
+import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.rtmpStreamer.SurfaceTextureEncoder
 import java.util.*
 
@@ -448,7 +449,13 @@ class CameraStreamManager(private val context: Context) {
         val supportedSizes: List<Size>,
         val supportedFrameRates: List<Int>
     ) {
-        val displayName: String
-            get() = if (isFront) "前置摄像头" else "后置摄像头"
+        fun displayName(context: Context): String {
+            val nameResId = if (isFront) {
+                R.string.camera_front_camera
+            } else {
+                R.string.camera_back_camera
+            }
+            return context.getString(nameResId)
+        }
     }
 }

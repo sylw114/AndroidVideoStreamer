@@ -1,3 +1,66 @@
 <resources>
     <string name="app_name">VideoStreamer</string>
+    <string name="tab_settings">设置</string>
+    <string name="tab_video">录屏</string>
+    <string name="tab_camera">摄像头</string>
+
+    <string name="language_chinese">中文</string>
+    <string name="language_english">English</string>
+
+    <string name="settings_language">界面语言：</string>
+    <string name="settings_streaming_protocol">推流协议：</string>
+    <string name="settings_stream_url">%1$s 推流地址：</string>
+    <string name="settings_video_encoding_mode">视频编码模式：</string>
+    <string name="settings_video_bitrate">视频码率：</string>
+    <string name="settings_bitrate_kbps">码率 (kbps)</string>
+    <string name="settings_video_quality_value">视频质量：%1$d</string>
+    <string name="settings_frame_rate_value">帧率：%1$d fps</string>
+    <string name="settings_udp_audio_configuration">UDP 音频配置：</string>
+    <string name="settings_server_ip">服务器 IP</string>
+    <string name="settings_tcp_control_port">TCP 控制端口</string>
+    <string name="settings_udp_data_port">UDP 数据端口</string>
+    <string name="settings_enable_redundant_transmission">启用冗余传输</string>
+    <string name="settings_redundant_transmission_tip">启用后会增加网络负载，但可提升音频稳定性。</string>
+    <string name="settings_info_content_description">说明</string>
+    <string name="settings_latency_recording">启用延迟记录与导出</string>
+
+    <string name="common_save">保存</string>
+    <string name="common_unselected">未选择</string>
+    <string name="fps_value">%1$d fps</string>
+
+    <string name="video_screen_service_running">录屏服务正在运行</string>
+    <string name="video_authorize_and_start_screen">授权并开启录屏</string>
+    <string name="video_start_streaming">开始推流</string>
+    <string name="video_stop_streaming">停止推流</string>
+    <string name="video_start_audio">开始音频</string>
+    <string name="video_stop_audio_with_latency">停止音频 (延迟: %1$s)</string>
+    <string name="video_export_latency">导出延迟</string>
+
+    <string name="camera_current_config">当前配置：</string>
+    <string name="camera_bitrate_value">码率: %1$d kbps</string>
+    <string name="camera_quality_value">质量: %1$d</string>
+    <string name="camera_no_audio">无音频</string>
+    <string name="camera_keep_page_open">请保持此页面开启</string>
+    <string name="camera_black_screen_hint">2 分钟后将自动黑屏省电</string>
+    <string name="camera_choose_camera">选择摄像头</string>
+    <string name="camera_camera">摄像头</string>
+    <string name="camera_front_camera">前置摄像头</string>
+    <string name="camera_back_camera">后置摄像头</string>
+    <string name="camera_resolution">分辨率</string>
+    <string name="camera_frame_rate">帧率</string>
+    <string name="camera_start_camera">启动摄像头</string>
+    <string name="camera_stop_camera">停止摄像头</string>
+
+    <string name="latency_no_records">暂无延迟记录</string>
+    <string name="latency_log_header">包序号\t最小(ms)\t最大(ms)\n</string>
+
+    <string name="error_start_stream_failed">启动推流失败：%1$s</string>
+    <string name="error_camera_permission_required">需要摄像头权限才能使用此功能</string>
+    <string name="error_rtmp_url_required">请先在设置页面配置 RTMP 地址</string>
+
+    <string name="notification_screen_service_running">录屏服务运行中</string>
+    <string name="notification_capturing_screen">正在捕获屏幕...</string>
+    <string name="notification_screen_streaming">录屏直播中</string>
+    <string name="notification_streaming_detail">正在推流：%1$dx%2$d, DPI=%3$d</string>
+    <string name="notification_channel_screen_capture">屏幕捕获</string>
 </resources>

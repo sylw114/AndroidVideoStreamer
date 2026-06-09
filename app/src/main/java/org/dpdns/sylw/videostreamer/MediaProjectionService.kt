@@ -263,9 +263,10 @@ class MediaProjectionService : Service() {
     }
 
     private fun setupProjection(resultCode: Int, data: Intent) {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("录屏服务运行中")
-            .setContentText("正在捕获屏幕...")
+        val localizedContext = localizedForCurrentAppLanguage()
+        val notification = NotificationCompat.Builder(localizedContext, CHANNEL_ID)
+            .setContentTitle(localizedContext.getString(R.string.notification_screen_service_running))
+            .setContentText(localizedContext.getString(R.string.notification_capturing_screen))
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .build()
@@ -645,7 +646,8 @@ class MediaProjectionService : Service() {
             try {
                 vd.resize(newWidth, newHeight, cachedDpi)
 //                android.util.Log.d("MediaProj", "✓ VirtualDisplay resized successfully: ${newWidth}x${newHeight}, DPI=$cachedDpi")
-                updateNotification("正在推流：${cachedWidth}x${cachedHeight}, DPI=$cachedDpi")
+                val localizedContext = localizedForCurrentAppLanguage()
+                updateNotification(localizedContext.getString(R.string.notification_streaming_detail, cachedWidth, cachedHeight, cachedDpi))
             } catch (e: Exception) {
 //                android.util.Log.e("MediaProj", "✗ Failed to resize VirtualDisplay: ${e.message}", e)
             }
@@ -674,8 +676,9 @@ class MediaProjectionService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("录屏直播中")
+        val localizedContext = localizedForCurrentAppLanguage()
+        val notification = NotificationCompat.Builder(localizedContext, CHANNEL_ID)
+            .setContentTitle(localizedContext.getString(R.string.notification_screen_streaming))
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
@@ -712,9 +715,10 @@ class MediaProjectionService : Service() {
     }
 
     private fun createNotificationChannel() {
+        val localizedContext = localizedForCurrentAppLanguage()
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Screen Capture",
+            localizedContext.getString(R.string.notification_channel_screen_capture),
             NotificationManager.IMPORTANCE_LOW
         )
         val manager = getSystemService(NotificationManager::class.java)

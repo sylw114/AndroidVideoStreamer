@@ -1,0 +1,66 @@
+<resources>
+    <string name="app_name">VideoStreamer</string>
+    <string name="tab_settings">Settings</string>
+    <string name="tab_video">Screen</string>
+    <string name="tab_camera">Camera</string>
+
+    <string name="language_chinese">中文</string>
+    <string name="language_english">English</string>
+
+    <string name="settings_language">Language:</string>
+    <string name="settings_streaming_protocol">Streaming Protocol:</string>
+    <string name="settings_stream_url">%1$s Streaming URL:</string>
+    <string name="settings_video_encoding_mode">Video Encoding Mode:</string>
+    <string name="settings_video_bitrate">Video Bitrate:</string>
+    <string name="settings_bitrate_kbps">Bitrate (kbps)</string>
+    <string name="settings_video_quality_value">Video Quality: %1$d</string>
+    <string name="settings_frame_rate_value">Frame Rate: %1$d fps</string>
+    <string name="settings_udp_audio_configuration">UDP Audio Configuration:</string>
+    <string name="settings_server_ip">Server IP</string>
+    <string name="settings_tcp_control_port">TCP Control Port</string>
+    <string name="settings_udp_data_port">UDP Data Port</string>
+    <string name="settings_enable_redundant_transmission">Enable Redundant Transmission</string>
+    <string name="settings_redundant_transmission_tip">Enabling this will increase network load but improve audio stability.</string>
+    <string name="settings_info_content_description">Info</string>
+    <string name="settings_latency_recording">Enable latency recording and export</string>
+
+    <string name="common_save">Save</string>
+    <string name="common_unselected">Not selected</string>
+    <string name="fps_value">%1$d fps</string>
+
+    <string name="video_screen_service_running">Screen service is running</string>
+    <string name="video_authorize_and_start_screen">Authorize and Start Screen Capture</string>
+    <string name="video_start_streaming">Start Streaming</string>
+    <string name="video_stop_streaming">Stop Streaming</string>
+    <string name="video_start_audio">Start Audio</string>
+    <string name="video_stop_audio_with_latency">Stop Audio (Lat: %1$s)</string>
+    <string name="video_export_latency">Export Latency</string>
+
+    <string name="camera_current_config">Current Configuration:</string>
+    <string name="camera_bitrate_value">Bitrate: %1$d kbps</string>
+    <string name="camera_quality_value">Quality: %1$d</string>
+    <string name="camera_no_audio">No audio</string>
+    <string name="camera_keep_page_open">Keep this page open</string>
+    <string name="camera_black_screen_hint">The screen will go black after 2 minutes to save power</string>
+    <string name="camera_choose_camera">Choose camera</string>
+    <string name="camera_camera">Camera</string>
+    <string name="camera_front_camera">Front camera</string>
+    <string name="camera_back_camera">Rear camera</string>
+    <string name="camera_resolution">Resolution</string>
+    <string name="camera_frame_rate">Frame Rate</string>
+    <string name="camera_start_camera">Start Camera</string>
+    <string name="camera_stop_camera">Stop Camera</string>
+
+    <string name="latency_no_records">No latency records</string>
+    <string name="latency_log_header">Seq\tMin(ms)\tMax(ms)\n</string>
+
+    <string name="error_start_stream_failed">Failed to start streaming: %1$s</string>
+    <string name="error_camera_permission_required">Camera permission is required to use this feature</string>
+    <string name="error_rtmp_url_required">Configure the RTMP URL in Settings first</string>
+
+    <string name="notification_screen_service_running">Screen capture service is running</string>
+    <string name="notification_capturing_screen">Capturing screen...</string>
+    <string name="notification_screen_streaming">Screen streaming</string>
+    <string name="notification_streaming_detail">Streaming: %1$dx%2$d, DPI=%3$d</string>
+    <string name="notification_channel_screen_capture">Screen Capture</string>
+</resources>

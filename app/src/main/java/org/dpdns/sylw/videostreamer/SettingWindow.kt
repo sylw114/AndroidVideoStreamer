@@ -14,6 +14,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.tooling.preview.Preview
@@ -62,6 +63,8 @@ object StreamConfig {
     fun setUdpAudioRedundant(v: Boolean?) { state["redundant"] = v }
     fun getLatencyRecordingEnabled(): Boolean? = state["latencyRecording"] as? Boolean
     fun setLatencyRecordingEnabled(v: Boolean?) { state["latencyRecording"] = v }
+    fun getAppLanguage(): String? = state["language"] as? String
+    fun setAppLanguage(v: String?) { state["language"] = v }
 }
 
 private val PREF_STREAM_URL = stringPreferencesKey("stream_url")
@@ -116,7 +119,11 @@ private fun RowScope.CheckboxOption(checked: Boolean, onChecked: () -> Unit, lab
 }
 
 @Composable
-fun SettingWindow(modifier: Modifier = Modifier) {
+fun SettingWindow(
+    modifier: Modifier = Modifier,
+    selectedLanguage: String = resolveDefaultAppLanguage(),
+    onLanguageChange: (String) -> Unit = {}
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -179,7 +186,25 @@ fun SettingWindow(modifier: Modifier = Modifier) {
     }
 
     Column(modifier = modifier.fillMaxSize().padding(5.dp, 16.dp, 5.dp, 16.dp).verticalScroll(scrollState)) {
-        SectionLabel("Streaming Protocol:")
+        SectionLabel(stringResource(R.string.settings_language))
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            APP_LANGUAGE_OPTIONS.forEach { option ->
+                val languageCode = option.code
+                CheckboxOption(
+                    checked = selectedLanguage == languageCode,
+                    onChecked = {
+                        val normalizedLanguage = normalizeAppLanguage(languageCode)
+                        StreamConfig.setAppLanguage(normalizedLanguage)
+                        onLanguageChange(normalizedLanguage)
+                        save { saveAppLanguage(context, normalizedLanguage) }
+                    },
+                    label = stringResource(option.labelResId)
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+        SectionLabel(stringResource(R.string.settings_streaming_protocol))
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             protocols.forEach { p ->
                 CheckboxOption(
@@ -191,7 +216,7 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-        SectionLabel("$selectedProtocol Streaming Url:")
+        SectionLabel(stringResource(R.string.settings_stream_url, selectedProtocol))
         OutlinedTextField(
             value = url,
             onValueChange = { url = it; StreamConfig.setCurrentUrl(it); save { saveUrl(context, it) } },
@@ -201,7 +226,7 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         )
 
         Spacer(modifier = Modifier.height(24.dp))
-        SectionLabel("Video Encoding Mode:")
+        SectionLabel(stringResource(R.string.settings_video_encoding_mode))
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             listOf("CBR", "CQ").forEach { mode ->
                 CheckboxOption(
@@ -213,13 +238,13 @@ fun SettingWindow(modifier: Modifier = Modifier) {
         }
 
         if (videoMode == "CBR") {
-            SectionLabel("Video Bitrate:")
+            SectionLabel(stringResource(R.string.settings_video_bitrate))
             OutlinedTextField(
                 value = bitrateInput,
                 onValueChange = { bitrateInput = it },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
                 singleLine = true,
-                label = { Text("Bitrate (kbps)") },
+                label = { Text(stringResource(R.string.settings_bitrate_kbps)) },
                 modifier = Modifier.fillMaxWidth()
             )
             Button(
@@ -233,12 +258,12 @@ fun SettingWindow(modifier: Modifier = Modifier) {
                 },
                 modifier = Modifier.width(80.dp).padding(top = 8.dp),
                 shape = androidx.compose.ui.graphics.RectangleShape
-            ) { Text("Save") }
+            ) { Text(stringResource(R.string.common_save)) }
             Spacer(modifier = Modifier.height(24.dp))
         }
 
         if (videoMode == "CQ") {
-            SectionLabel("Video Quality: $videoQuality")
+            SectionLabel(stringResource(R.string.settings_video_quality_value, videoQuality))
             Slider(
                 value = videoQuality.toFloat(),
                 onValueChange = { q ->
@@ -271,7 +296,7 @@ fun SettingWindow(modifier: Modifier = Modifier) {
             Spacer(modifier = Modifier.height(24.dp))
         }
 
-        SectionLabel("Frame Rate: $frameRate fps")
+        SectionLabel(stringResource(R.string.settings_frame_rate_value, frameRate))
         frameRates.forEach { fps ->
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -281,16 +306,16 @@ fun SettingWindow(modifier: Modifier = Modifier) {
                     checked = frameRate == fps,
                     onCheckedChange = { if (it) { frameRate = fps; StreamConfig.setFrameRate(fps); save { saveFrameRate(context, fps) } } }
                 )
-                Text("$fps fps", modifier = Modifier.padding(start = 8.dp))
+                Text(stringResource(R.string.fps_value, fps), modifier = Modifier.padding(start = 8.dp))
             }
         }
 
         Spacer(modifier = Modifier.height(24.dp))
-        SectionLabel("UDP Audio Configuration:")
+        SectionLabel(stringResource(R.string.settings_udp_audio_configuration))
         OutlinedTextField(
             value = udpAudioIp,
             onValueChange = { udpAudioIp = it; StreamConfig.setUdpAudioIp(it); save { saveUdpAudioIp(context, it) } },
-            label = { Text("Server IP") },
+            label = { Text(stringResource(R.string.settings_server_ip)) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
@@ -303,7 +328,7 @@ fun SettingWindow(modifier: Modifier = Modifier) {
                     save { saveTcpControlPort(context, p) }
                 }
             },
-            label = { Text("TCP Control Port") },
+            label = { Text(stringResource(R.string.settings_tcp_control_port)) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
@@ -316,7 +341,7 @@ fun SettingWindow(modifier: Modifier = Modifier) {
                     save { saveUdpAudioPort(context, p) }
                 }
             },
-            label = { Text("UDP Data Port") },
+            label = { Text(stringResource(R.string.settings_udp_data_port)) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
@@ -329,11 +354,11 @@ fun SettingWindow(modifier: Modifier = Modifier) {
                     save { saveUdpAudioRedundant(context, enabled) }
                 }
             )
-            Text("Enable Redundant Transmission")
+            Text(stringResource(R.string.settings_enable_redundant_transmission))
             IconButton(
-                onClick = { Toast.makeText(context, "Enabling this will increase network load but improve audio stability.", Toast.LENGTH_LONG).show() },
+                onClick = { Toast.makeText(context, context.getString(R.string.settings_redundant_transmission_tip), Toast.LENGTH_LONG).show() },
                 modifier = Modifier.size(24.dp)
-            ) { Icon(Icons.Default.Info, contentDescription = "Info", tint = Color.Gray) }
+            ) { Icon(Icons.Default.Info, contentDescription = stringResource(R.string.settings_info_content_description), tint = Color.Gray) }
         }
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Checkbox(
@@ -344,7 +369,7 @@ fun SettingWindow(modifier: Modifier = Modifier) {
                     save { saveLatencyRecordingEnabled(context, enabled) }
                 }
             )
-            Text("启用延迟记录与导出")
+            Text(stringResource(R.string.settings_latency_recording))
         }
     }
 }

@@ -2,7 +2,6 @@ package org.dpdns.sylw.videostreamer
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.app.Activity
 import android.content.pm.PackageManager
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -16,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
@@ -39,7 +39,10 @@ import org.dpdns.sylw.videostreamer.ui.theme.VideoStreamerTheme
 @Composable
 fun CameraWindow(modifier: Modifier = Modifier) {
     val context = LocalContext.current
+    val activity = context.findActivity()
     val scope = rememberCoroutineScope()
+    val cameraPermissionRequiredText = stringResource(R.string.error_camera_permission_required)
+    val rtmpUrlRequiredText = stringResource(R.string.error_rtmp_url_required)
     
     // Camera 管理器
     var cameraManager by remember { mutableStateOf<CameraStreamManager?>(null) }
@@ -85,7 +88,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 }
             }
         } else {
-            errorMessage = "需要摄像头权限才能使用此功能"
+            errorMessage = cameraPermissionRequiredText
         }
     }
     
@@ -148,7 +151,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         if (isStreaming) {
             cameraManager?.stopStreaming()
             // 取消屏幕常亮
-            (context as? Activity)?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             // 取消黑屏计时器
             blackScreenJob?.cancel()
             isBlackScreenMode = false
@@ -158,7 +161,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 val rtmpUrl = loadUrl(context)
                 if (!rtmpUrl.isNullOrEmpty()) {
                     // 设置屏幕常亮
-                    (context as? Activity)?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     
                     cameraManager?.startStreaming(rtmpUrl)
                     
@@ -172,7 +175,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         }
                     }
                 } else {
-                    errorMessage = "请先在设置页面配置 RTMP 地址"
+                    errorMessage = rtmpUrlRequiredText
                 }
             }
         }
@@ -222,11 +225,11 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     }
     
     // 页面销毁时释放资源
-    DisposableEffect(Unit) {
+    DisposableEffect(activity) {
         onDispose {
             cameraManager?.release()
             // 清除屏幕常亮
-            (context as? Activity)?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
     }
     
@@ -248,34 +251,38 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = "当前配置：",
+                    text = stringResource(R.string.camera_current_config),
                     style = MaterialTheme.typography.titleMedium,
                 )
                 
                 Spacer(modifier = Modifier.height(8.dp))
                 
                 Text(
-                    text = availableCameras.find { it.cameraId == selectedCameraId }?.displayName ?: "未选择",
+                    text = availableCameras.find { it.cameraId == selectedCameraId }?.displayName(context) ?: stringResource(R.string.common_unselected),
                 )
                 Text(
-                    text = "$selectedResolution @ ${selectedFrameRate}fps",
+                    text = "$selectedResolution @ ${stringResource(R.string.fps_value, selectedFrameRate)}",
                 )
                 Text(
-                    text = if (videoMode == "CBR") "码率: ${videoBitrate / 1000} kbps" else "质量: $videoQuality",
+                    text = if (videoMode == "CBR") {
+                        stringResource(R.string.camera_bitrate_value, videoBitrate / 1000)
+                    } else {
+                        stringResource(R.string.camera_quality_value, videoQuality)
+                    },
                 )
                 Text(
-                    text = "无音频",
+                    text = stringResource(R.string.camera_no_audio),
                 )
                 
                 if (isStreaming) {
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = "请保持此页面开启",
+                        text = stringResource(R.string.camera_keep_page_open),
                         color = Color.Yellow,
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        text = "2分钟后将自动黑屏省电",
+                        text = stringResource(R.string.camera_black_screen_hint),
                         color = Color.Gray,
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -295,10 +302,10 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         onExpandedChange = { cameraMenuExpanded = !cameraMenuExpanded }
                     ) {
                         OutlinedTextField(
-                            value = availableCameras.find { it.cameraId == selectedCameraId }?.displayName ?: "选择摄像头",
+                            value = availableCameras.find { it.cameraId == selectedCameraId }?.displayName(context) ?: stringResource(R.string.camera_choose_camera),
                             onValueChange = {},
                             readOnly = true,
-                            label = { Text("摄像头") },
+                            label = { Text(stringResource(R.string.camera_camera)) },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = cameraMenuExpanded) },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -310,7 +317,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         ) {
                             availableCameras.forEach { camera ->
                                 DropdownMenuItem(
-                                    text = { Text(camera.displayName) },
+                                    text = { Text(camera.displayName(context)) },
                                     onClick = {
                                         selectedCameraId = camera.cameraId
                                         cameraMenuExpanded = false
@@ -333,7 +340,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                                 value = selectedResolution,
                                 onValueChange = {},
                                 readOnly = true,
-                                label = { Text("分辨率") },
+                                label = { Text(stringResource(R.string.camera_resolution)) },
                                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = resolutionMenuExpanded) },
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -366,10 +373,10 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         onExpandedChange = { frameRateMenuExpanded = !frameRateMenuExpanded }
                     ) {
                         OutlinedTextField(
-                            value = "$selectedFrameRate fps",
+                            value = stringResource(R.string.fps_value, selectedFrameRate),
                             onValueChange = {},
                             readOnly = true,
-                            label = { Text("帧率") },
+                            label = { Text(stringResource(R.string.camera_frame_rate)) },
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = frameRateMenuExpanded) },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -381,7 +388,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         ) {
                             supportedFrameRates.forEach { fps ->
                                 DropdownMenuItem(
-                                    text = { Text("$fps fps") },
+                                    text = { Text(stringResource(R.string.fps_value, fps)) },
                                     onClick = {
                                         selectedFrameRate = fps
                                         frameRateMenuExpanded = false
@@ -401,7 +408,13 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         containerColor =  Color.Red
                     ) else ButtonDefaults.buttonColors()
                 ) {
-                    Text(if (isCameraReady) "停止摄像头" else "启动摄像头")
+                    Text(
+                        if (isCameraReady) {
+                            stringResource(R.string.camera_stop_camera)
+                        } else {
+                            stringResource(R.string.camera_start_camera)
+                        }
+                    )
                 }
                 
                 // 开始/停止推流按钮
@@ -413,7 +426,13 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         containerColor = if (isStreaming) Color.Red else Color.Green
                     )
                 ) {
-                    Text(if (isStreaming) "停止推流" else "开始推流")
+                    Text(
+                        if (isStreaming) {
+                            stringResource(R.string.video_stop_streaming)
+                        } else {
+                            stringResource(R.string.video_start_streaming)
+                        }
+                    )
                 }
             }
         }

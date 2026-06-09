@@ -16,9 +16,15 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import kotlinx.coroutines.launch
 import org.dpdns.sylw.videostreamer.ui.theme.VideoStreamerTheme
@@ -29,11 +35,26 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            VideoStreamerTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    WindowForSelecting(
-                        modifier = Modifier.padding(innerPadding)
-                    )
+            val context = LocalContext.current
+            var appLanguage by remember { mutableStateOf(resolveDefaultAppLanguage()) }
+
+            LaunchedEffect(Unit) {
+                appLanguage = loadAppLanguage(context)
+                StreamConfig.setAppLanguage(appLanguage)
+            }
+
+            AppLocaleProvider(appLanguage) {
+                VideoStreamerTheme {
+                    Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
+                        WindowForSelecting(
+                            appLanguage = appLanguage,
+                            onLanguageChange = { language ->
+                                appLanguage = normalizeAppLanguage(language)
+                                StreamConfig.setAppLanguage(appLanguage)
+                            },
+                            modifier = Modifier.padding(innerPadding)
+                        )
+                    }
                 }
             }
         }
@@ -42,9 +63,17 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun WindowForSelecting(modifier: Modifier = Modifier) {
+fun WindowForSelecting(
+    modifier: Modifier = Modifier,
+    appLanguage: String = resolveDefaultAppLanguage(),
+    onLanguageChange: (String) -> Unit = {}
+) {
 
-    val tabs = listOf("Setting", "Video", "Camera")
+    val tabs = listOf(
+        stringResource(R.string.tab_settings),
+        stringResource(R.string.tab_video),
+        stringResource(R.string.tab_camera)
+    )
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
 
@@ -75,7 +104,10 @@ fun WindowForSelecting(modifier: Modifier = Modifier) {
             }
 
             when (page) {
-                0 -> SettingWindow()
+                0 -> SettingWindow(
+                    selectedLanguage = appLanguage,
+                    onLanguageChange = onLanguageChange
+                )
                 1 -> VideoWindow()
                 2 -> CameraWindow()
             }
