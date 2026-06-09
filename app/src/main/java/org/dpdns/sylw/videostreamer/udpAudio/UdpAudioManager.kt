@@ -55,6 +55,7 @@ class UdpAudioManager {
     private var currentChannelConfig: Int = AudioFormat.CHANNEL_IN_STEREO
 
     private var latencyLogFile: File? = null
+    private var recordEnabled: Boolean = false
 
     fun getLatencyLogFile(): File? = latencyLogFile
 
@@ -67,7 +68,7 @@ class UdpAudioManager {
         if (!enabled) stop()
     }
 
-    fun start(audioConfig: AudioPlaybackCaptureConfiguration?, logFile: File? = null) {
+    fun start(audioConfig: AudioPlaybackCaptureConfiguration?, logFile: File? = null, recordEnabled: Boolean = false) {
         // 🔥 如果之前处于连接状态，强制进行一次探测性清理，防止残留状态
         if (isConnected) {
             val socket = tcpSocket
@@ -81,9 +82,10 @@ class UdpAudioManager {
 
         if (!isEnabled || isCapturing) return
 
-        latencyLogFile = logFile
+        latencyLogFile = if (recordEnabled) logFile else null
+        this.recordEnabled = recordEnabled
         try {
-            logFile?.writeText("包序号\t最小(ms)\t最大(ms)\n")
+            if (recordEnabled) logFile?.writeText("包序号\t最小(ms)\t最大(ms)\n")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to init latency log file: ${e.message}")
         }
@@ -278,11 +280,13 @@ class UdpAudioManager {
                                 val clampedMin = maxOf(0L, minLatency)
                                 val clampedMax = maxOf(0L, maxLatency)
                                 val record = LatencyRecord(seq = seq, minLatency = clampedMin, maxLatency = clampedMax)
-                                synchronized(latencyRecords) { latencyRecords.add(record) }
-                                try {
-                                    latencyLogFile?.appendText("${record.seq}\t${record.minLatency}\t${record.maxLatency}\n")
-                                } catch (e: Exception) {
-                                    Log.e(TAG, "Failed to write latency record: ${e.message}")
+                                if (recordEnabled) {
+                                    synchronized(latencyRecords) { latencyRecords.add(record) }
+                                    try {
+                                        latencyLogFile?.appendText("${record.seq}\t${record.minLatency}\t${record.maxLatency}\n")
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Failed to write latency record: ${e.message}")
+                                    }
                                 }
                                 lastValidMin = clampedMin
                                 lastValidMax = clampedMax

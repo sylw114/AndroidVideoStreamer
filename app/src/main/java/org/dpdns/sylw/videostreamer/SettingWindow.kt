@@ -60,6 +60,8 @@ object StreamConfig {
     fun setUdpAudioPort(v: Int?) { state["udpPort"] = v }
     fun getUdpAudioRedundant(): Boolean? = state["redundant"] as? Boolean
     fun setUdpAudioRedundant(v: Boolean?) { state["redundant"] = v }
+    fun getLatencyRecordingEnabled(): Boolean? = state["latencyRecording"] as? Boolean
+    fun setLatencyRecordingEnabled(v: Boolean?) { state["latencyRecording"] = v }
 }
 
 private val PREF_STREAM_URL = stringPreferencesKey("stream_url")
@@ -72,6 +74,7 @@ private val PREF_UDP_AUDIO_IP = stringPreferencesKey("udp_audio_ip")
 private val PREF_TCP_CONTROL_PORT = intPreferencesKey("tcp_control_port")
 private val PREF_UDP_AUDIO_PORT = intPreferencesKey("udp_audio_port")
 private val PREF_UDP_AUDIO_REDUNDANT = booleanPreferencesKey("udp_audio_redundant")
+private val PREF_LATENCY_RECORDING = booleanPreferencesKey("latency_recording")
 
 suspend fun saveUrl(context: Context, url: String) = prefSave(context, PREF_STREAM_URL, url)
 suspend fun loadUrl(context: Context): String = prefLoad(context, PREF_STREAM_URL, "")
@@ -93,6 +96,8 @@ suspend fun saveUdpAudioPort(context: Context, port: Int) = prefSave(context, PR
 suspend fun loadUdpAudioUdpPort(context: Context): Int = prefLoad(context, PREF_UDP_AUDIO_PORT, 9000)
 suspend fun saveUdpAudioRedundant(context: Context, enabled: Boolean) = prefSave(context, PREF_UDP_AUDIO_REDUNDANT, enabled)
 suspend fun loadUdpAudioRedundant(context: Context): Boolean = prefLoad(context, PREF_UDP_AUDIO_REDUNDANT, false)
+suspend fun saveLatencyRecordingEnabled(context: Context, enabled: Boolean) = prefSave(context, PREF_LATENCY_RECORDING, enabled)
+suspend fun loadLatencyRecordingEnabled(context: Context): Boolean = prefLoad(context, PREF_LATENCY_RECORDING, false)
 
 @Composable
 private fun SectionLabel(text: String) {
@@ -126,6 +131,7 @@ fun SettingWindow(modifier: Modifier = Modifier) {
     var tcpControlPort by remember { mutableStateOf("9998") }
     var udpAudioPort by remember { mutableStateOf("9999") }
     var udpAudioRedundant by remember { mutableStateOf(false) }
+    var latencyRecordingEnabled by remember { mutableStateOf(false) }
 
     val scrollState = rememberScrollState()
     val frameRates = listOf(30, 60, 120, 144, 165)
@@ -167,6 +173,9 @@ fun SettingWindow(modifier: Modifier = Modifier) {
 
         udpAudioRedundant = loadUdpAudioRedundant(context)
         StreamConfig.setUdpAudioRedundant(udpAudioRedundant)
+
+        latencyRecordingEnabled = loadLatencyRecordingEnabled(context)
+        StreamConfig.setLatencyRecordingEnabled(latencyRecordingEnabled)
     }
 
     Column(modifier = modifier.fillMaxSize().padding(5.dp, 16.dp, 5.dp, 16.dp).verticalScroll(scrollState)) {
@@ -325,6 +334,17 @@ fun SettingWindow(modifier: Modifier = Modifier) {
                 onClick = { Toast.makeText(context, "Enabling this will increase network load but improve audio stability.", Toast.LENGTH_LONG).show() },
                 modifier = Modifier.size(24.dp)
             ) { Icon(Icons.Default.Info, contentDescription = "Info", tint = Color.Gray) }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Checkbox(
+                checked = latencyRecordingEnabled,
+                onCheckedChange = { enabled ->
+                    latencyRecordingEnabled = enabled
+                    StreamConfig.setLatencyRecordingEnabled(enabled)
+                    save { saveLatencyRecordingEnabled(context, enabled) }
+                }
+            )
+            Text("启用延迟记录与导出")
         }
     }
 }

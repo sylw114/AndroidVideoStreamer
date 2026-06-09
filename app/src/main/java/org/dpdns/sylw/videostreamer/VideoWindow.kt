@@ -516,8 +516,9 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                 val config = binder.getService().config
                                 binder.setAudioCaptureMode(isVideoPush = false)
                                 udpAudioManager?.updateConfig(ip, tcpPort, udpPort, true)
-                                val logFile = java.io.File(context.filesDir, "latency_log.txt")
-                                udpAudioManager?.start(config, logFile)
+                                val recordEnabled = StreamConfig.getLatencyRecordingEnabled() ?: false
+                                val logFile = if (recordEnabled) java.io.File(context.filesDir, "latency_log.txt") else null
+                                udpAudioManager?.start(config, logFile, recordEnabled)
                             }
                         }
                     }
@@ -537,7 +538,8 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 onClick = {
                     exportLauncher.launch("latency_${System.currentTimeMillis()}.txt")
                 },
-                enabled = isUdpAudioStreaming || (udpAudioManager?.getLatencyLogFile()?.exists() == true)
+                enabled = (StreamConfig.getLatencyRecordingEnabled() == true) &&
+                        (isUdpAudioStreaming || (udpAudioManager?.getLatencyLogFile()?.exists() == true))
             ) {
                 Text("导出延迟")
             }
