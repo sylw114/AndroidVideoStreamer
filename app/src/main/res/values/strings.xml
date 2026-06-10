@@ -57,6 +57,7 @@
     <string name="error_start_stream_failed">启动推流失败：%1$s</string>
     <string name="error_camera_permission_required">需要摄像头权限才能使用此功能</string>
     <string name="error_rtmp_url_required">请先在设置页面配置 RTMP 地址</string>
+    <string name="error_invalid_rtmp_url">推流地址格式无效：%1$s\n地址必须以 rtmp:// 开头</string>
 
     <string name="notification_screen_service_running">录屏服务运行中</string>
     <string name="notification_capturing_screen">正在捕获屏幕...</string>

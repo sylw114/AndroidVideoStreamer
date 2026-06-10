@@ -13,6 +13,7 @@ import android.util.DisplayMetrics
 import android.view.Surface
 import android.view.TextureView
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -184,6 +185,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 
                 onError = { error ->
 //                android.util.Log.e("VideoWindow", "Stream error: $error")
+                    Toast.makeText(context, error, Toast.LENGTH_LONG).show()
                 }
             }
 
@@ -227,6 +229,9 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 }
                 onLatencyUpdated = { min, max ->
                     currentLatency = Pair(min, max)
+                }
+                onError = { error ->
+                    Toast.makeText(context, error, Toast.LENGTH_LONG).show()
                 }
             }
         
@@ -442,58 +447,61 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                         } else {
                             // 开始推流
                             val rtmpUrl = currentRtmpUrl
-                            if (!rtmpUrl.isNullOrEmpty()) {
+                            if (rtmpUrl.isNullOrEmpty()) {
+                                Toast.makeText(context, context.getString(R.string.error_rtmp_url_required), Toast.LENGTH_LONG).show()
+                                return@let
+                            }
+                            // 验证 URL 格式
+                            if (!rtmpUrl.startsWith("rtmp://")) {
+                                Toast.makeText(context, context.getString(R.string.error_invalid_rtmp_url, rtmpUrl), Toast.LENGTH_LONG).show()
+                                return@let
+                            }
 
-                                // 获取实际屏幕分辨率（物理尺寸）
-                                mediaProjectionService?.let { binder ->
-                                    val screenSize = binder.getScreenRealSize()
-                                    val actualWidth = screenSize.x
-                                    val actualHeight = screenSize.y
+                            // 获取实际屏幕分辨率（物理尺寸）
+                            mediaProjectionService?.let { binder ->
+                                val screenSize = binder.getScreenRealSize()
+                                val actualWidth = screenSize.x
+                                val actualHeight = screenSize.y
 
 //                                    android.util.Log.d("VideoWindow", "推流分辨率：${actualWidth}x${actualHeight}")
 //                                    android.util.Log.d("VideoWindow", "=== 配置结束 ===")
 
-                                    // 在后台线程启动推流，避免 NetworkOnMainThreadException
-                                    kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                        try {
-                                            // 加载保存的码率和帧率
-                                            val savedBitrate = loadBitrate(context)
-                                            val savedFrameRate = loadFrameRate(context)
+                                // 在后台线程启动推流，避免 NetworkOnMainThreadException
+                                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                    try {
+                                        // 加载保存的码率和帧率
+                                        val savedBitrate = loadBitrate(context)
+                                        val savedFrameRate = loadFrameRate(context)
 
-                                            // 使用 MediaProjectionService 的实际分辨率
-                                            val screenSize = binder.getScreenRealSize()
-                                            val actualWidth = screenSize.x
-                                            val actualHeight = screenSize.y
+                                        // 使用 MediaProjectionService 的实际分辨率
+                                        val screenSize = binder.getScreenRealSize()
+                                        val actualWidth = screenSize.x
+                                        val actualHeight = screenSize.y
 //                                            android.util.Log.d("VideoWindow", "Starting RTMP streaming: ${actualWidth}x${actualHeight}, bitrate=$savedBitrate, fps=$savedFrameRate to: $rtmpUrl")
 
-                                            // 设置视频参数（使用实际分辨率和保存的帧率）
-                                            manager.setVideoParams(
-                                                width = actualWidth,
-                                                height = actualHeight,
-                                                bitrate = savedBitrate,
-                                                frameRate = savedFrameRate,
-                                                iFrameInterval = 5,
-                                                videoMode = StreamConfig.getRateMode() ?: "CBR",
-                                                videoQuality = StreamConfig.getCqQuality() ?: 70
-                                            )
+                                        // 设置视频参数（使用实际分辨率和保存的帧率）
+                                        manager.setVideoParams(
+                                            width = actualWidth,
+                                            height = actualHeight,
+                                            bitrate = savedBitrate,
+                                            frameRate = savedFrameRate,
+                                            iFrameInterval = 5,
+                                            videoMode = StreamConfig.getRateMode() ?: "CBR",
+                                            videoQuality = StreamConfig.getCqQuality() ?: 70
+                                        )
 
-                                            manager.startStreaming(rtmpUrl)
+                                        manager.startStreaming(rtmpUrl)
 //                                            android.util.Log.d("VideoWindow", "Started streaming to: $rtmpUrl")
-                                        } catch (e: Exception) {
+                                    } catch (e: Exception) {
 //                                            android.util.Log.e("VideoWindow", "Failed to start streaming", e)
-                                            // 在主线程显示错误
-                                            withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                                manager.onError?.invoke(context.getString(R.string.error_start_stream_failed, e.message ?: ""))
-                                            }
+                                        // 在主线程显示错误
+                                        withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                            manager.onError?.invoke(context.getString(R.string.error_start_stream_failed, e.message ?: ""))
                                         }
                                     }
-                                } ?: run {
-//                                    android.util.Log.e("VideoWindow", "MediaProjectionService not bound!")
                                 }
-                            } else {
-                                // 如果没有设置 RTMP URL，提示用户去设置页面配置
-//                                android.util.Log.w("VideoWindow", "RTMP URL not set, please configure in Settings")
-                                // TODO: 可以显示一个 Toast 或对话框提示用户
+                            } ?: run {
+//                                    android.util.Log.e("VideoWindow", "MediaProjectionService not bound!")
                             }
                         }
                     }

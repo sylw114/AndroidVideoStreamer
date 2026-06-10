@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.view.WindowManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -117,6 +118,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 errorMessage = error
                 isCameraReady = false
                 isStreaming = false
+                Toast.makeText(context, error, Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -159,23 +161,31 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             // 从全局配置加载 RTMP URL
             scope.launch {
                 val rtmpUrl = loadUrl(context)
-                if (!rtmpUrl.isNullOrEmpty()) {
-                    // 设置屏幕常亮
-                    activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                    
-                    cameraManager?.startStreaming(rtmpUrl)
-                    
-                    // 启动黑屏计时器
-                    blackScreenJob?.cancel()
-                    isBlackScreenMode = false
-                    blackScreenJob = scope.launch {
-                        kotlinx.coroutines.delay(120_000)
-                        if (isStreaming) {
-                            isBlackScreenMode = true
-                        }
-                    }
-                } else {
+                if (rtmpUrl.isNullOrEmpty()) {
                     errorMessage = rtmpUrlRequiredText
+                    Toast.makeText(context, rtmpUrlRequiredText, Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                // 验证 URL 格式
+                if (!rtmpUrl.startsWith("rtmp://")) {
+                    val error = context.getString(R.string.error_invalid_rtmp_url, rtmpUrl)
+                    errorMessage = error
+                    Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                    return@launch
+                }
+                // 设置屏幕常亮
+                activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                
+                cameraManager?.startStreaming(rtmpUrl)
+                
+                // 启动黑屏计时器
+                blackScreenJob?.cancel()
+                isBlackScreenMode = false
+                blackScreenJob = scope.launch {
+                    kotlinx.coroutines.delay(120_000)
+                    if (isStreaming) {
+                        isBlackScreenMode = true
+                    }
                 }
             }
         }
