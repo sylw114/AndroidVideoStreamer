@@ -102,6 +102,9 @@ class RtmpPusher {
         }
     }
     
+    // 是否启用了音频（影响发送线程的等待逻辑）
+    private var audioEnabled: Boolean = true
+
     // 连接状态回调
     var onConnectionStateChanged: ((Boolean) -> Unit)? = null
 
@@ -621,14 +624,19 @@ class RtmpPusher {
                         // 只有视频队列有数据，但音频队列为空
                         // 说明对应时间段的音频帧还没生产出来，需要等待
                         videoHead != null && audioHead == null -> {
-                            // 使用 wait/notify 避免忙等待
-                            synchronized(audioAvailableLock) {
-                                hasAudioAvailable = false
-                                // 设置超时，防止永久等待（最多等待100ms）
-                                audioAvailableLock.wait(100)
+                            if (audioEnabled) {
+                                // 🔥 音频启用时：等待音频数据到达，保证音画同步
+                                synchronized(audioAvailableLock) {
+                                    hasAudioAvailable = false
+                                    // 设置超时，防止永久等待（最多等待100ms）
+                                    audioAvailableLock.wait(100)
+                                }
+                                // 唤醒后重新循环检查
+                                continue
+                            } else {
+                                // 🔥 音频禁用时（如相机推流）：直接发送视频，不等待
+                                selectedPacket = videoPacketQueue.poll()
                             }
-                            // 唤醒后重新循环检查
-                            continue
                         }
                         // 两个队列都为空，短暂休眠
                         else -> {
@@ -1360,6 +1368,7 @@ class RtmpPusher {
 
     fun setVideoParams(w: Int, h: Int, b: Int, f: Int) { videoWidth = w; videoHeight = h; videoBitrate = b; frameRate = f }
     fun setAudioParams(sampleRate: Int, channels: Int) { audioSampleRate = sampleRate; audioChannelCount = channels }
+    fun setAudioEnabled(enabled: Boolean) { audioEnabled = enabled }
     fun getCurrentUrl() = serverUrl
     
     /**

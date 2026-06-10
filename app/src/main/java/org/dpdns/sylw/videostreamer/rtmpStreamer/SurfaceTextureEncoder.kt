@@ -234,6 +234,7 @@ class SurfaceTextureEncoder(
             rtmpPusher = RtmpPusher()
             rtmpPusher?.setVideoParams(width, height, videoBitrate, frameRate)
             rtmpPusher?.setAudioParams(audioSampleRate, audioChannelCount)
+            rtmpPusher?.setAudioEnabled(useAudio)
             
             // 在后台线程中连接，避免 NetworkOnMainThreadException
             rtmpPusher?.onConnectionStateChanged = { isConnected ->
