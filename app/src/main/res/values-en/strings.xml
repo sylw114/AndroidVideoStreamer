@@ -58,6 +58,7 @@
     <string name="error_camera_permission_required">Camera permission is required to use this feature</string>
     <string name="error_rtmp_url_required">Configure the RTMP URL in Settings first</string>
     <string name="error_invalid_rtmp_url">Invalid stream URL: %1$s\nURL must start with rtmp://</string>
+    <string name="error_udp_audio_ip_invalid">Invalid UDP audio IP address, configure it in Settings</string>
 
     <string name="notification_screen_service_running">Screen capture service is running</string>
     <string name="notification_capturing_screen">Capturing screen...</string>

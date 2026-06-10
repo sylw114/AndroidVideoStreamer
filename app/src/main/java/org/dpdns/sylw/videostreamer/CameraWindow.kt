@@ -118,7 +118,10 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 errorMessage = error
                 isCameraReady = false
                 isStreaming = false
-                Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                // 🔥 确保在主线程显示 Toast，避免后台线程崩溃
+                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                    Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                }
             }
         }
     }

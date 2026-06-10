@@ -185,7 +185,10 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 
                 onError = { error ->
 //                android.util.Log.e("VideoWindow", "Stream error: $error")
-                    Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                    // 🔥 确保在主线程显示 Toast，避免后台线程崩溃
+                    kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                    }
                 }
             }
 
@@ -231,7 +234,10 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     currentLatency = Pair(min, max)
                 }
                 onError = { error ->
-                    Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                    // 🔥 确保在主线程显示 Toast，避免后台线程崩溃
+                    kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                        Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                    }
                 }
             }
         
@@ -536,6 +542,17 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     } else {
                         scope.launch {
                             val ip = loadUdpAudioIp(context)
+                            // 🔥 前置校验 IP 有效性
+                            if (ip.isBlank()) {
+                                Toast.makeText(context, context.getString(R.string.error_udp_audio_ip_invalid), Toast.LENGTH_LONG).show()
+                                return@launch
+                            }
+                            // 简单的 IP 格式检查（避免无效 IP 导致 InetAddress.getByName 异常闪退）
+                            val ipPattern = Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")
+                            if (!ipPattern.matches(ip.trim())) {
+                                Toast.makeText(context, context.getString(R.string.error_udp_audio_ip_invalid), Toast.LENGTH_LONG).show()
+                                return@launch
+                            }
                             val tcpPort = loadTcpControlPort(context)
                             val udpPort = loadUdpAudioUdpPort(context)
                             mediaProjectionService?.let { binder ->
