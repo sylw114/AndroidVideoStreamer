@@ -76,6 +76,20 @@ fun WindowForSelecting(
     )
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    // 🔥 预先从 DataStore 加载所有配置到 StreamConfig 内存缓存
+    // 保证子页面读取 StreamConfig.getXxx()!! 时值一定存在
+    var configLoaded by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        StreamConfig.setCurrentUrl(loadUrl(context))
+        StreamConfig.setVideoBitrate(loadBitrate(context))
+        StreamConfig.setFrameRate(loadFrameRate(context))
+        StreamConfig.setStreamingProtocol(loadProtocol(context))
+        StreamConfig.setVideoMode(loadVideoMode(context))
+        StreamConfig.setVideoQuality(loadVideoQuality(context))
+        configLoaded = true
+    }
 
     Column(modifier.fillMaxSize()) {
 
@@ -93,25 +107,28 @@ fun WindowForSelecting(
             }
         }
 
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.fillMaxSize()
-        ) { page ->
+        // 🔥 配置加载完成后才渲染页面，确保子页面读取 StreamConfig 时不为空
+        if (configLoaded) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize()
+            ) { page ->
 
-            val focusManager = LocalFocusManager.current
-            LaunchedEffect(pagerState.currentPage) {
-                focusManager.clearFocus()
+                val focusManager = LocalFocusManager.current
+                LaunchedEffect(pagerState.currentPage) {
+                    focusManager.clearFocus()
+                }
+
+                when (page) {
+                    0 -> SettingWindow(
+                        selectedLanguage = appLanguage,
+                        onLanguageChange = onLanguageChange
+                    )
+                    1 -> VideoWindow()
+                    2 -> CameraWindow()
+                }
+
             }
-
-            when (page) {
-                0 -> SettingWindow(
-                    selectedLanguage = appLanguage,
-                    onLanguageChange = onLanguageChange
-                )
-                1 -> VideoWindow()
-                2 -> CameraWindow()
-            }
-
         }
     }
 }

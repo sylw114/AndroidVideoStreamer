@@ -147,24 +147,25 @@ fun SettingWindow(
     fun save(action: suspend () -> Unit) = scope.launch { action() }
 
     LaunchedEffect(Unit) {
-        url = loadUrl(context)
+        // 🔥 WindowForSelecting 已预加载到 StreamConfig，这里只需读内存
+        url = StreamConfig.getCurrentUrl() ?: ""
         StreamConfig.setCurrentUrl(url)
 
-        val savedBitrate = loadBitrate(context)
+        val savedBitrate = StreamConfig.getVideoBitrate() ?: 2500 * 1024
         StreamConfig.setVideoBitrate(savedBitrate)
         bitrateKbps = savedBitrate / 1024
         bitrateInput = bitrateKbps.toString()
 
-        frameRate = loadFrameRate(context)
+        frameRate = StreamConfig.getFrameRate() ?: 30
         StreamConfig.setFrameRate(frameRate)
 
-        selectedProtocol = loadProtocol(context)
+        selectedProtocol = StreamConfig.getStreamingProtocol() ?: "RTMP"
         StreamConfig.setStreamingProtocol(selectedProtocol)
 
-        videoMode = loadVideoMode(context)
+        videoMode = StreamConfig.getRateMode() ?: "CBR"
         StreamConfig.setVideoMode(videoMode)
 
-        videoQuality = loadVideoQuality(context)
+        videoQuality = StreamConfig.getCqQuality() ?: 70
         StreamConfig.setVideoQuality(videoQuality)
 
         udpAudioIp = loadUdpAudioIp(context)
