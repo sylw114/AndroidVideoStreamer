@@ -39,6 +39,7 @@ class UdpAudioManager {
     private var tcpSocket: java.net.Socket? = null
     private var tcpOutputStream: java.io.OutputStream? = null
     private var serverAddress: InetAddress? = null
+    @Volatile
     private var isConnected: Boolean = false
     private var mtu: Int = 1400 // Default value
 
@@ -245,8 +246,13 @@ class UdpAudioManager {
                             .put(0x02.toByte())
                             .putLong(timestamp)
                             .array()
-                        tcpOutputStream?.write(hb)
-                        tcpOutputStream?.flush()
+                        try {
+                            tcpOutputStream?.write(hb)
+                            tcpOutputStream?.flush()
+                        } catch (_: java.io.IOException) {
+                            stop()
+                            break
+                        }
                         delay(1000)
                     }
                 }
