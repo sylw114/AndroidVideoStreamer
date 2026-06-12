@@ -52,10 +52,10 @@ const config = {
 const nms = new NodeMediaServer(config);
 nms.run();
 
-nms.on('postPublish', (id, StreamPath, args) => {
+nms.on('postPublish', (sessions) => {
 });
 
-nms.on('donePublish', (id, StreamPath, args) => {
+nms.on('donePublish', (sessions) => {
 });
 
 ```
@@ -64,3 +64,7 @@ nms.on('donePublish', (id, StreamPath, args) => {
 
 ## 声明
 本项目主要由AI编写，代码质量可能存在问题 ~~250 warnings~~ ，如有大佬发现问题，请提issue，万分感谢。
+
+## 已知问题
+
+长时间使用可能把音频内录干崩，干崩了就只有重启内录才有声音了
