@@ -41,7 +41,7 @@
     <string name="camera_quality_value">Quality: %1$d</string>
     <string name="camera_no_audio">No audio</string>
     <string name="camera_keep_page_open">Keep this page open</string>
-    <string name="camera_black_screen_hint">The screen will go black after 2 minutes to save power</string>
+    <string name="camera_black_screen_hint">The screen will go black after 30s to save power</string>
     <string name="camera_choose_camera">Choose camera</string>
     <string name="camera_camera">Camera</string>
     <string name="camera_front_camera">Front camera</string>
