@@ -9,6 +9,9 @@ import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
+
+// remember to check about startSendThread()
+
 /**
  * 修复后的 RTMP 推流器
  * 专注于视频推流稳定性，修复了握手、连接命令及分块封装逻辑
@@ -37,7 +40,9 @@ class RtmpPusher {
 
     private var socket: Socket? = null
     private var outputStream: OutputStream? = null
-    private var inputStream: InputStream? = null
+//    private var inputStream: InputStream? = null
+    // 包装后的 inputStream，用于检测服务端 FIN 断连
+    private var eofStream: EofDetectingInputStream? = null
 
     private var serverHost: String = ""
     private var serverPort: Int = 1935
@@ -117,9 +122,12 @@ class RtmpPusher {
             socket?.connect(InetSocketAddress(serverHost, serverPort), 10000)
             socket?.tcpNoDelay = true
             outputStream = socket?.outputStream
-            inputStream = socket?.inputStream
+            // 用 EofDetectingInputStream 包装，便于发送线程感知服务端 FIN 断连
+            val wrapped = socket?.inputStream?.let { EofDetectingInputStream(it) }
+//            inputStream = wrapped
+            eofStream = wrapped
 
-            if (outputStream == null || inputStream == null) throw IOException("Socket error")
+            if (outputStream == null || eofStream == null) throw IOException("Socket error")
 
             handshake()
             
@@ -197,7 +205,7 @@ class RtmpPusher {
         val readStartTime = System.currentTimeMillis()
         
         while (totalRead < s0s1s2.size && (System.currentTimeMillis() - readStartTime) < timeout) {
-            val bytesRead = inputStream?.read(s0s1s2, totalRead, s0s1s2.size - totalRead) ?: -1
+            val bytesRead = eofStream?.read(s0s1s2, totalRead, s0s1s2.size - totalRead) ?: -1
             if (bytesRead == -1) {
                 throw IOException("Handshake: Server closed connection before sending complete S0S1S2")
             }
@@ -598,16 +606,27 @@ class RtmpPusher {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
             
             while (isSendThreadRunning && !Thread.interrupted()) {
+                // remember to check if read used in another place and runs together with send, if so, delete the code below
+                eofStream?.read()
+                // 检测服务端 FIN 断连：握手阶段的 read 或前一次 send 的异常
+                // 都会设置 serverEof，这里统一感知并及时退出
+                if (eofStream?.serverEof == true) {
+//                    Log.w(TAG, "Send thread exiting: server FIN detected")
+                    isConnected = false
+                    onConnectionStateChanged?.invoke(false)
+                    break
+                }
+
                 try {
                     // 策略：查看两个队列的队头，选择时间戳更小的那个发送
                     // 视频帧需要等待对应的音频帧到达，避免音频连发现象
-                    
+
                     var selectedPacket: RtmpPacket? = null
-                    
+
                     // 获取两个队列的队头（不取出，只peek）
                     val audioHead = audioPacketQueue.peek()
                     val videoHead = videoPacketQueue.peek()
-                    
+
                     when {
                         // 两个队列都有数据，比较时间戳
                         audioHead != null && videoHead != null -> {
@@ -631,6 +650,13 @@ class RtmpPusher {
                                     // 设置超时，防止永久等待（最多等待100ms）
                                     audioAvailableLock.wait(100)
                                 }
+                                // wait 返回后再次检查服务端是否已断连
+                                // 避免在服务端已 FIN 的情况下继续发送
+                                if (eofStream?.serverEof == true) {
+                                    isConnected = false
+                                    onConnectionStateChanged?.invoke(false)
+                                    break
+                                }
                                 // 唤醒后重新循环检查
                                 continue
                             } else {
@@ -644,16 +670,18 @@ class RtmpPusher {
                             continue
                         }
                     }
-                    
+
                     // 发送选中的包
                     selectedPacket?.let { packet ->
                         doSendPacket(packet.csid, packet.msid, packet.ts, packet.type, packet.payload)
                     }
-                    
+
                 } catch (e: InterruptedException) {
                     break
                 } catch (e: Exception) {
 //                    Log.e(TAG, "Error in send thread: ${e.message}")
+                    // 发送 IO 异常说明连接已断，标记 EOF 让下一次循环统一退出
+                    eofStream?.markEof()
                     isConnected = false
                     onConnectionStateChanged?.invoke(false)
                 }
@@ -843,13 +871,12 @@ class RtmpPusher {
         var lastTimestamp: Int = 0
             
         while (System.currentTimeMillis() - start < 5000) {
-            // Read with timeout handling
-            if ((inputStream?.available() ?: 0) == 0) {
+            if ((eofStream?.available() ?: 0) == 0) {
                 Thread.sleep(10)
                 continue
             }
                 
-            val b = inputStream?.read() ?: -1
+            val b = eofStream?.read() ?: -1
             if (b == -1) throw IOException("Disconnected")
     
             val fmt = (b shr 6) and 0x03
@@ -869,7 +896,7 @@ class RtmpPusher {
             if (headerSize > 0) {
                 var totalRead = 0
                 while (totalRead < headerSize) {
-                    val n = inputStream?.read(header, totalRead, headerSize - totalRead) ?: -1
+                    val n = eofStream?.read(header, totalRead, headerSize - totalRead) ?: -1
                     if (n == -1) throw IOException("Disconnected while reading header")
                     totalRead += n
                 }
@@ -938,7 +965,7 @@ class RtmpPusher {
                 val extTs = ByteArray(4)
                 var totalRead = 0
                 while (totalRead < 4) {
-                    val n = inputStream?.read(extTs, totalRead, 4 - totalRead) ?: -1
+                    val n = eofStream?.read(extTs, totalRead, 4 - totalRead) ?: -1
                     if (n == -1) throw IOException("Disconnected while reading extended timestamp")
                     totalRead += n
                 }
@@ -957,7 +984,7 @@ class RtmpPusher {
                 val payload = ByteArray(msgLen)
                 var r = 0
                 while (r < msgLen) {
-                    val n = inputStream?.read(payload, r, msgLen - r) ?: -1
+                    val n = eofStream?.read(payload, r, msgLen - r) ?: -1
                     if (n == -1) break
                     r += n
                 }
@@ -1021,8 +1048,8 @@ class RtmpPusher {
             var lastTimestamp: Int = 0
             
             while (System.currentTimeMillis() - start < 2000) {
-                if ((inputStream?.available() ?: 0) > 0) {
-                    val b = inputStream?.read() ?: break
+                if ((eofStream?.available() ?: 0) > 0) {
+                    val b = eofStream?.read() ?: break
 
                     val fmt = (b shr 6) and 0x03
                     val csid = b and 0x3F
@@ -1039,7 +1066,7 @@ class RtmpPusher {
                     if (headerSize > 0) {
                         var totalRead = 0
                         while (totalRead < headerSize) {
-                            val n = inputStream?.read(header, totalRead, headerSize - totalRead) ?: -1
+                            val n = eofStream?.read(header, totalRead, headerSize - totalRead) ?: -1
                             if (n == -1) break
                             totalRead += n
                         }
@@ -1096,7 +1123,7 @@ class RtmpPusher {
                         val extTs = ByteArray(4)
                         var totalRead = 0
                         while (totalRead < 4) {
-                            val n = inputStream?.read(extTs, totalRead, 4 - totalRead) ?: -1
+                            val n = eofStream?.read(extTs, totalRead, 4 - totalRead) ?: -1
                             if (n == -1) break
                             totalRead += n
                         }
@@ -1115,7 +1142,7 @@ class RtmpPusher {
                         val payload = ByteArray(msgLen)
                         var r = 0
                         while (r < msgLen) {
-                            val n = inputStream?.read(payload, r, msgLen - r) ?: -1
+                            val n = eofStream?.read(payload, r, msgLen - r) ?: -1
                             if (n == -1) break
                             r += n
                         }
@@ -1273,9 +1300,10 @@ class RtmpPusher {
     }
 
     fun disconnect() {
-        // 🔥 停止发送线程
-        stopSendThread()
-        
+        // 停止发送线程
+//        stopSendThread()
+        eofStream?.markEof()
+
         if (!isConnected) {
             try {
                 socket?.close()
@@ -1283,9 +1311,10 @@ class RtmpPusher {
 //                Log.w(TAG, "Error closing socket: ${e.message}")
             }
             socket = null
+            eofStream = null
             return
         }
-        
+
         try {
             // Standard RTMP disconnection sequence
             // 1. Close stream
@@ -1293,17 +1322,17 @@ class RtmpPusher {
                 closeStream()
                 Thread.sleep(50)
             }
-            
+
             // 2. Delete stream
             if (streamId > 0) {
                 deleteStream()
                 Thread.sleep(50)
             }
-            
+
             // 3. Flush any pending data
             outputStream?.flush()
             Thread.sleep(100)
-            
+
         } catch (e: Exception) {
 //            Log.w(TAG, "Error during RTMP disconnect sequence: ${e.message}")
         } finally {
@@ -1319,7 +1348,8 @@ class RtmpPusher {
             } finally {
                 socket = null
                 outputStream = null
-                inputStream = null
+//                inputStream = null
+                eofStream = null
             }
         }
     }

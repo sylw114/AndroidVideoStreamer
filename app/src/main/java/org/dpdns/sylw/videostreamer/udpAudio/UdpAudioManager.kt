@@ -131,7 +131,7 @@ class UdpAudioManager {
                 startTcpControlLoop()
                 
                 // 4. 发送握手包
-                // 🔥 在握手前计算音频配置，确保发送的是真实支持的配置
+                // 在握手前计算音频配置，确保发送的是真实支持的配置
                 resolveAudioConfig()
                 sendHandshake()
                 
