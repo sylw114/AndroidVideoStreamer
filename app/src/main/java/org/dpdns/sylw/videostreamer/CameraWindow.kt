@@ -33,7 +33,7 @@ import org.dpdns.sylw.videostreamer.ui.theme.VideoStreamerTheme
  * 1. 无预览界面（降低性能开销）
  * 2. 强制横屏
  * 3. 启动录制后屏幕常亮
- * 4. 智能省电模式（2分钟后黑屏，点击恢复）
+ * 4. 智能省电模式（30s钟后黑屏，点击恢复）
  * 5. 使用抽象层 StreamManager
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -157,9 +157,6 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             cameraManager?.stopStreaming()
             // 取消屏幕常亮
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            // 取消黑屏计时器
-            blackScreenJob?.cancel()
-            isBlackScreenMode = false
         } else {
             // 从全局配置加载 RTMP URL
             scope.launch {
@@ -185,7 +182,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 blackScreenJob?.cancel()
                 isBlackScreenMode = false
                 blackScreenJob = scope.launch {
-                    kotlinx.coroutines.delay(120_000)
+                    kotlinx.coroutines.delay(30_000)
                     if (isStreaming) {
                         isBlackScreenMode = true
                     }
@@ -196,12 +193,12 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     
     // 点击屏幕恢复显示
     fun handleScreenClick() {
-        if (isBlackScreenMode && isStreaming) {
-            isBlackScreenMode = false
-            // 重新计时
-            blackScreenJob?.cancel()
+        blackScreenJob?.cancel()
+        isBlackScreenMode = false
+        // 重新计时
+        if(isStreaming){
             blackScreenJob = scope.launch {
-                kotlinx.coroutines.delay(120_000)
+                kotlinx.coroutines.delay(30_000)
                 if (isStreaming) {
                     isBlackScreenMode = true
                 }
@@ -451,7 +448,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         }
         
         // 🔥 黑屏模式：使用 Popup 覆盖整个屏幕（包括状态栏和导航栏）
-        if (isBlackScreenMode) {
+        if (isBlackScreenMode && isStreaming) {
             Popup(
                 properties = PopupProperties(
                     focusable = true,
