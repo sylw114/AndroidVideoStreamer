@@ -5,8 +5,6 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.SurfaceTexture
 import android.hardware.camera2.*
-import android.media.MediaCodec
-import android.media.MediaFormat
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -19,8 +17,7 @@ import java.util.*
 
 /**
  * Camera 推流管理器
- * 
- * 🔥 核心功能：
+ *
  * 1. 管理 Camera2 API
  * 2. 将摄像头数据直接编码为 H.264
  * 3. 通过 RTMP 推流（无音频）
@@ -132,17 +129,17 @@ class CameraStreamManager(private val context: Context) {
      * 获取支持的帧率范围
      */
     private fun getSupportedFrameRates(characteristics: CameraCharacteristics?): List<Int> {
+        if (characteristics == null) return listOf(30)
+
         return try {
-            val fpsRanges = characteristics?.get(
+            val fpsRanges = characteristics.get(
                 CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
-            )
-            // 提取常见的固定帧率
-            val commonFrameRates = setOf(15, 24, 30, 60)
-            fpsRanges?.flatMap { range ->
-                commonFrameRates.filter { it in range.lower..range.upper }
-            }?.distinct()?.sorted() ?: listOf(30)
+            ) ?: return listOf(30)
+
+            fpsRanges.map { it.upper }
+                .distinct()
+                .sorted()
         } catch (e: Exception) {
-//            Log.e(TAG, "Failed to get supported frame rates", e)
             listOf(30)
         }
     }
@@ -433,7 +430,7 @@ class CameraStreamManager(private val context: Context) {
         cameraHandler = null
         
         cameraManager = null
-        
+
         onStreamingStateChanged = null
         onError = null
         
