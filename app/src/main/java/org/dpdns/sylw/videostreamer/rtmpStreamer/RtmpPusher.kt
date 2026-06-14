@@ -594,6 +594,8 @@ class RtmpPusher {
     
     // 🔥 低延迟优化：跟踪 flush 计数
     private var packetCountSinceFlush = 0
+
+    private var eofCheckThread: Thread? = null
     
     /**
      * 启动发送线程（在 connect 成功后调用）
@@ -602,12 +604,16 @@ class RtmpPusher {
         if (isSendThreadRunning) return
         
         isSendThreadRunning = true
+                // remember to check if read used in another place and runs together with send, if so, delete the code below
+        eofCheckThread = Thread({
+            eofStream?.read()
+         })
+
         sendThread = Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-            
+
             while (isSendThreadRunning && !Thread.interrupted()) {
-                // remember to check if read used in another place and runs together with send, if so, delete the code below
-                eofStream?.read()
+
                 // 检测服务端 FIN 断连：握手阶段的 read 或前一次 send 的异常
                 // 都会设置 serverEof，这里统一感知并及时退出
                 if (eofStream?.serverEof == true) {
@@ -849,7 +855,7 @@ class RtmpPusher {
                     // 视频队列满，丢弃最旧的视频帧
                     videoPacketQueue.poll()
                     videoPacketQueue.offer(packet)
-//                    Log.w(TAG, "Video packet queue full, dropped oldest video packet")
+//                    Log.w(TAG, "Video packet queue full, dropped the oldest video packet")
                 }
             }
             else -> {

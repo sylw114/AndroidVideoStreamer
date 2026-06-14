@@ -176,8 +176,18 @@ fun VideoWindow(modifier: Modifier = Modifier) {
         if (activity == null) {
             onDispose {}
         } else {
-            // 🔥 关键修复：设置全局 streaming 引用，让 SettingWindow 可以访问
-            streamManager = StreamManager(activity).apply {
+            // 关键修复：设置全局 streaming 引用，让 SettingWindow 可以访问
+            streamManager = StreamManager(activity){ surface ->
+                mediaProjectionService?.let { binder ->
+                    try {
+                        val screenSize = binder.getScreenRealSize()
+                        binder.updateVirtualDisplaySurface(surface, screenSize.x, screenSize.y)
+//                            android.util.Log.d("VideoWindow", "✓ VirtualDisplay surface swapped to encoder input")
+                    } catch (e: Exception) {
+//                            android.util.Log.e("VideoWindow", "✗ Failed to swap VirtualDisplay surface: ${e.message}")
+                    }
+                }
+            }.apply {
                 onStreamingStateChanged = { streaming ->
                     isStreaming = streaming
 //                android.util.Log.d("VideoWindow", "Streaming state changed: $streaming")

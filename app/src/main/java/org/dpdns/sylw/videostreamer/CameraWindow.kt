@@ -7,6 +7,7 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraInfo
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -47,9 +48,8 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     
     // Camera 管理器
     var cameraManager by remember { mutableStateOf<CameraStreamManager?>(null) }
-    
+
     // 状态管理
-    var isCameraReady by remember { mutableStateOf(false) }
     var isStreaming by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     
@@ -80,8 +80,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            // 权限已授予，初始化 Camera 管理器
-            cameraManager?.init()
+            // 权限已授予，刷新摄像头列表
             cameraManager?.let {
                 availableCameras = it.getAvailableCameras()
                 if (availableCameras.isNotEmpty()) {
@@ -97,26 +96,20 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     fun initCameraManager() {
         cameraManager = CameraStreamManager(context).apply {
             init()
-            
+
             // 获取可用摄像头
             availableCameras = getAvailableCameras()
             if (availableCameras.isNotEmpty()) {
                 selectedCameraId = availableCameras.first().cameraId
             }
-            
-            // 🔥 摄像头就绪状态
-            onCameraReady = { ready ->
-                isCameraReady = ready
-            }
-            
+
             // 🔥 推流状态
             onStreamingStateChanged = { streaming ->
                 isStreaming = streaming
             }
-            
+
             onError = { error ->
                 errorMessage = error
-                isCameraReady = false
                 // 🔥 确保在主线程显示 Toast，避免后台线程崩溃
                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
                     Toast.makeText(context, error, Toast.LENGTH_LONG).show()
@@ -124,40 +117,26 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             }
         }
     }
-    
-    // 启动/停止摄像头
-    fun toggleCamera() {
-//        android.util.Log.d("CameraWindow", "toggleCamera called, isCameraReady=$isCameraReady")
-        
-        if (isCameraReady) {
-            // 停止摄像头
-//            android.util.Log.d("CameraWindow", "Stopping camera...")
+
+    // 开始/停止推流（同时打开/关闭摄像头）
+    fun toggleStreaming() {
+        if (isStreaming) {
+//            cameraManager?.stopStreaming()
             cameraManager?.closeCamera()
-            isCameraReady = false
+
+            // 取消屏幕常亮
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
-            // 启动摄像头前检查权限
             selectedCameraId?.let { cameraId ->
-                // 🔥 关键修复：在启动摄像头时才请求权限
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                     val (width, height) = selectedResolution.split("x").map { it.toInt() }
 //                    android.util.Log.d("CameraWindow", "Starting camera: $cameraId, ${width}x${height}, ${selectedFrameRate}fps")
-                    cameraManager?.openCamera(cameraId, width, height, selectedFrameRate, videoBitrate, videoMode, videoQuality)
                 } else {
                     // 请求权限
                     permissionLauncher.launch(Manifest.permission.CAMERA)
                 }
             }
-        }
-    }
-    
-    // 开始/停止推流
-    fun toggleStreaming() {
-        if (isStreaming) {
-            cameraManager?.stopStreaming()
-            // 取消屏幕常亮
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        } else {
-            // 从全局配置加载 RTMP URL
+
             scope.launch {
                 val rtmpUrl = loadUrl(context)
                 if (rtmpUrl.isNullOrEmpty()) {
@@ -174,9 +153,11 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 }
                 // 设置屏幕常亮
                 activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                
-                cameraManager?.startStreaming(rtmpUrl)
-                
+                if(selectedCameraId != null){
+                    val (width, height) = selectedResolution.split("x").map { it.toInt() }
+                    cameraManager?.startStreaming(rtmpUrl, selectedCameraId!!, width, height, selectedFrameRate)
+                }
+
                 // 启动黑屏计时器
                 blackScreenJob?.cancel()
                 isBlackScreenMode = false
@@ -304,7 +285,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 // 配置选择（仅在未推流时显示）
-                if (!isCameraReady && !isStreaming && availableCameras.isNotEmpty()) {
+                if (!isStreaming && availableCameras.isNotEmpty()) {
                     // 摄像头选择
                     ExposedDropdownMenuBox(
                         expanded = cameraMenuExpanded,
@@ -408,28 +389,10 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                     }
                 }
                 
-                // 启动/停止摄像头按钮
-                Button(
-                    onClick = ::toggleCamera,
-                    enabled = !isStreaming,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = if (isCameraReady) ButtonDefaults.buttonColors(
-                        containerColor =  Color.Red
-                    ) else ButtonDefaults.buttonColors()
-                ) {
-                    Text(
-                        if (isCameraReady) {
-                            stringResource(R.string.camera_stop_camera)
-                        } else {
-                            stringResource(R.string.camera_start_camera)
-                        }
-                    )
-                }
-                
-                // 开始/停止推流按钮
+                // 开始/停止推流（点击时一并启动摄像头，或停止时一并关闭摄像头）
                 Button(
                     onClick = ::toggleStreaming,
-                    enabled = isCameraReady,
+                    enabled = !isStreaming && selectedCameraId != null,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (isStreaming) Color.Red else Color.Green

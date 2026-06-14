@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.Intent
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.util.Log
 
 /**
  * 推流管理器（重构版）
@@ -25,7 +24,7 @@ import android.util.Log
  * RtmpStreamingProtocol
  * ```
  */
-class StreamManager(private val activity: Activity) {
+class StreamManager(private val activity: Activity, val onSurfaceReady: ((android.view.Surface) -> Unit)) {
     
     companion object {
         private const val TAG = "StreamManager"
@@ -54,10 +53,14 @@ class StreamManager(private val activity: Activity) {
         
         // 根据协议名称创建对应的协议实例
         this.protocol = when (protocol.uppercase()) {
-            "RTMP" -> RtmpStreamingProtocol()
+            "RTMP" -> RtmpStreamingProtocol{surface ->
+//                Log.d(TAG, "Encoder surface ready, forwarding to UI layer")
+                this@StreamManager.onSurfaceReady(surface)}
             else -> {
 //                Log.w(TAG, "Unknown protocol: $protocol, fallback to RTMP")
-                RtmpStreamingProtocol()
+                RtmpStreamingProtocol{surface ->
+//                Log.d(TAG, "Encoder surface ready, forwarding to UI layer")
+                    this@StreamManager.onSurfaceReady(surface)}
             }
         }.apply {
             onStreamingStateChanged = { isStreaming ->

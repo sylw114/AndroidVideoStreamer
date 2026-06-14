@@ -2,10 +2,6 @@ package org.dpdns.sylw.videostreamer.rtmpStreamer
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
-import android.graphics.Matrix
-import android.hardware.display.DisplayManager
-import android.hardware.display.VirtualDisplay
 import android.media.*
 import android.media.projection.MediaProjection
 import android.os.Build
@@ -15,7 +11,6 @@ import androidx.annotation.RequiresPermission
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import org.dpdns.sylw.videostreamer.MediaProjectionService
 
 /**
  * SurfaceTexture 编码器
@@ -39,7 +34,8 @@ class SurfaceTextureEncoder(
     private val audioChannelCount: Int = 2,    // 音频声道数
     private val audioBitrate: Int = 128000,     // 音频码率 bps
     private val externalAudioSource: (() -> Pair<ByteArray, Long>?)? = null,  // 外部 PCM 音频源回调（返回 PCM 数据和采集时间戳）
-    private val isCameraMode: Boolean = false  // 🔥 Camera 模式标志
+    private val isCameraMode: Boolean = false,  // 🔥 Camera 模式标志
+    private val onSurfaceReady: ((Surface) -> Unit)
 ) {
     companion object {
         private const val TAG = "SurfaceTextureEncoder"
@@ -49,7 +45,6 @@ class SurfaceTextureEncoder(
 
     // 媒体投影相关
     private var mediaProjection: MediaProjection? = null
-    private var virtualDisplay: VirtualDisplay? = null
     
     // 视频编码相关
     private var mediaCodecVideo: MediaCodec? = null
@@ -191,18 +186,7 @@ class SurfaceTextureEncoder(
     fun setMediaProjection(projection: MediaProjection) {
         this.mediaProjection = projection
     }
-    
-    // MediaProjectionService binder (用于更新 VirtualDisplay surface)
-    private var mediaProjectionServiceBinder: Any? = null
-    
-    /**
-     * 设置 MediaProjectionService binder
-     */
-    fun setMediaProjectionServiceBinder(binder: Any) {
-        this.mediaProjectionServiceBinder = binder
-//        Log.d(TAG, "MediaProjectionService binder set")
-    }
-    
+
     /**
      * 获取编码器的 input surface
      */
@@ -268,29 +252,21 @@ class SurfaceTextureEncoder(
             
             if (!rtmpConnected) {
 //                Log.w(TAG, "RTMP connection timeout or failed")
-                // 🔥 关键修复：连接超时或失败时，不应设置推流状态为 true
+                // 关键修复：连接超时或失败时，不应设置推流状态为 true
                 // 停止所有已初始化的资源
                 stop()
                 throw connectException ?: java.io.IOException("RTMP connection timeout")
             }
-            
-            // 2. 初始化视频编码器 (先创建 surface)
+
             initVideoEncoder()
-            
-            // 🔥 关键修复：记录统一的推流开始时间（纳秒）
+
+            // 关键修复：记录统一的推流开始时间（纳秒）
             streamStartTimeNs = System.nanoTime()
 //            Log.d(TAG, "🕒 Stream start time baseline: ${streamStartTimeNs}ns")
-                        
-            // 3. 🔥 Camera 模式跳过 VirtualDisplay 创建
-            if (!isCameraMode) {
-                createVirtualDisplay()
-            } else {
-//                Log.d(TAG, "Camera mode: skipping VirtualDisplay creation")
-            }
-                        
-            // 4. 如果启用音频，初始化音频录制
+
+            createVirtualDisplay()
             if (useAudio) {
-                // 🔥 关键修复：无论是否使用外部音频源，都需要初始化 MediaCodec 音频编码器
+                // 关键修复：无论是否使用外部音频源，都需要初始化 MediaCodec 音频编码器
                 if (useExternalAudio) {
 //                    Log.d(TAG, "Using external PCM audio source, initializing MediaCodec encoder")
                 } else {
@@ -298,8 +274,7 @@ class SurfaceTextureEncoder(
                 }
                 initAudioEncoder()  // 🔥 总是初始化音频编码器
             }
-            
-            // 5. 启动编码线程
+
             startEncodeThread()
             
             isEncoding = true
@@ -449,23 +424,10 @@ class SurfaceTextureEncoder(
 //        android.util.Log.d(TAG, "Requesting to update VirtualDisplay surface with encoder's input surface")
         
         // 通过 binder 调用 MediaProjectionService 的 updateVirtualDisplaySurface
-        mediaProjectionServiceBinder?.let { binder ->
-            if (binder is MediaProjectionService.LocalBinder) {
-                try {
-                    binder.updateVirtualDisplaySurface(displaySurface, width, height)
-//                    Log.d(TAG, "✓ VirtualDisplay surface updated successfully")
-                } catch (e: Exception) {
-//                    Log.e(TAG, "✗ Failed to update VirtualDisplay surface: ${e.message}", e)
-                }
-            } else {
-//                Log.w(TAG, "Invalid binder type, cannot update VirtualDisplay surface")
-            }
-        } ?: run {
-//            Log.w(TAG, "MediaProjectionService binder not set, VirtualDisplay will use dummy surface")
-        }
+        onSurfaceReady(displaySurface)
     }
 
-    
+
     /**
      * 初始化 AAC 音频编码器
      */
