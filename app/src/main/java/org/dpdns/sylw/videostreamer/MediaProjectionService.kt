@@ -706,6 +706,14 @@ class MediaProjectionService : Service() {
         
         stopAudioCapture()
 
+        // 释放 VirtualDisplay
+        try {
+            virtualDisplay?.release()
+        } catch (e: Exception) {
+//            android.util.Log.w("MediaProj", "Failed to release VirtualDisplay: ${e.message}")
+        }
+        virtualDisplay = null
+
         // 清理我们自己创建的 Dummy Surface
         releaseDummySurface()
 

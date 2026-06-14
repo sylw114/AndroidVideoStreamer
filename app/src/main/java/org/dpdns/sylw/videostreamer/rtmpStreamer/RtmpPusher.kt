@@ -579,7 +579,7 @@ class RtmpPusher {
         val type: Int,
         val payload: ByteArray
     )
-    
+
     private val audioPacketQueue = java.util.concurrent.LinkedBlockingQueue<RtmpPacket>(50)
     private val videoPacketQueue = java.util.concurrent.LinkedBlockingQueue<RtmpPacket>(50)
     private var sendThread: Thread? = null
@@ -694,6 +694,7 @@ class RtmpPusher {
         }, "RtmpSendThread")
         
         sendThread?.start()
+        eofCheckThread?.start()
 //        Log.d(TAG, "Send thread started")
     }
     
@@ -705,6 +706,9 @@ class RtmpPusher {
         sendThread?.interrupt()
         sendThread?.join(1000)
         sendThread = null
+        eofCheckThread?.interrupt()
+        eofCheckThread?.join(1000)
+        eofCheckThread = null
         audioPacketQueue.clear()
         videoPacketQueue.clear()
 //        Log.d(TAG, "Send thread stopped")
@@ -1305,7 +1309,7 @@ class RtmpPusher {
 
     fun disconnect() {
         // 停止发送线程
-//        stopSendThread()
+        stopSendThread()
         eofStream?.markEof()
 
         if (!isConnected) {

@@ -391,9 +391,6 @@ class CameraStreamManager(private val context: Context) {
         Log.d(TAG, "Releasing CameraStreamManager...")
 
         stopStreaming()
-
-        // 释放协议层
-        streamManager?.release()
         streamManager = null
 
         // 停止后台线程
