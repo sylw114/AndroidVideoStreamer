@@ -1,8 +1,6 @@
 package org.dpdns.sylw.videostreamer.streaming
 
-import android.media.projection.MediaProjection
 import android.view.Surface
-import org.dpdns.sylw.videostreamer.MediaProjectionService
 
 /**
  * 推流协议抽象接口

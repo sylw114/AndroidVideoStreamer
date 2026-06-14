@@ -1,11 +1,9 @@
 package org.dpdns.sylw.videostreamer.rtmpStreamer
 
 import android.Manifest
-import android.content.pm.PackageManager
 import android.media.*
 import android.media.projection.MediaProjection
 import android.os.Build
-import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresPermission
 import java.io.ByteArrayOutputStream

@@ -1,13 +1,11 @@
 package org.dpdns.sylw.videostreamer
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraInfo
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -392,7 +390,6 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 // 开始/停止推流（点击时一并启动摄像头，或停止时一并关闭摄像头）
                 Button(
                     onClick = ::toggleStreaming,
-                    enabled = !isStreaming && selectedCameraId != null,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (isStreaming) Color.Red else Color.Green
