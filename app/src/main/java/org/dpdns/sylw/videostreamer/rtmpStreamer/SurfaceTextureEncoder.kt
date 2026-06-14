@@ -2,7 +2,6 @@ package org.dpdns.sylw.videostreamer.rtmpStreamer
 
 import android.Manifest
 import android.media.*
-import android.media.projection.MediaProjection
 import android.os.Build
 import android.view.Surface
 import androidx.annotation.RequiresPermission
@@ -32,7 +31,6 @@ class SurfaceTextureEncoder(
     private val audioChannelCount: Int = 2,    // 音频声道数
     private val audioBitrate: Int = 128000,     // 音频码率 bps
     private val externalAudioSource: (() -> Pair<ByteArray, Long>?)? = null,  // 外部 PCM 音频源回调（返回 PCM 数据和采集时间戳）
-    private val isCameraMode: Boolean = false,  // 🔥 Camera 模式标志
     private val onSurfaceReady: ((Surface) -> Unit)
 ) {
     companion object {
@@ -41,9 +39,6 @@ class SurfaceTextureEncoder(
         private const val AUDIO_MIME_TYPE = MediaFormat.MIMETYPE_AUDIO_AAC
     }
 
-    // 媒体投影相关
-    private var mediaProjection: MediaProjection? = null
-    
     // 视频编码相关
     private var mediaCodecVideo: MediaCodec? = null
     private var surface: Surface? = null
@@ -179,13 +174,6 @@ class SurfaceTextureEncoder(
     }
     
     /**
-     * 设置 MediaProjection（必须在调用 start 之前）
-     */
-    fun setMediaProjection(projection: MediaProjection) {
-        this.mediaProjection = projection
-    }
-
-    /**
      * 获取编码器的 input surface
      */
     fun getInputSurface(): Surface? {
@@ -203,14 +191,8 @@ class SurfaceTextureEncoder(
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun start(rtmpUrl: String) {
-        // 🔥 Camera 模式不需要 MediaProjection
-        if (!isCameraMode && mediaProjection == null) {
-            onError?.invoke("MediaProjection 未设置")
-            return
-        }
-        
         try {
-//            Log.d(TAG, "Starting encoder: ${width}x${height}, bitrate=$videoBitrate, fps=$frameRate, cameraMode=$isCameraMode")
+//            Log.d(TAG, "Starting encoder: ${width}x${height}, bitrate=$videoBitrate, fps=$frameRate")
             
             // 1. 初始化 RTMP 推流器
             rtmpPusher = RtmpPusher()

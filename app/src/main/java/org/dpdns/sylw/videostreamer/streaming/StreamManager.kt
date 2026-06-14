@@ -1,9 +1,6 @@
 package org.dpdns.sylw.videostreamer.streaming
 
 import android.app.Activity
-import android.content.Intent
-import android.media.projection.MediaProjection
-import android.media.projection.MediaProjectionManager
 
 /**
  * 推流管理器（重构版）
@@ -33,10 +30,6 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
     
     // 🔥 协议实例（通过接口抽象）
     private var protocol: IStreamingProtocol? = null
-    
-    // MediaProjection
-    private var mediaProjection: MediaProjection? = null
-    private var mediaProjectionManager: MediaProjectionManager? = null
     
     // 状态回调
     var onStreamingStateChanged: ((Boolean) -> Unit)? = null
@@ -70,18 +63,7 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
                 this@StreamManager.onError?.invoke(error)
             }
         }
-        
-        // 初始化 MediaProjectionManager
-        if(!currentConfig.isCameraMode)
-            mediaProjectionManager = activity.getSystemService(Activity.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-    }
-    
-    /**
-     * 设置 MediaProjection（从 MediaProjectionService 获取）
-     */
-    fun setMediaProjection(projection: MediaProjection) {
-        this.mediaProjection = projection
-//        Log.d(TAG, "MediaProjection set successfully")
+
     }
     
     /**
@@ -116,13 +98,15 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
         currentConfig = currentConfig.copy(externalAudioSource = audioSource)
 //        Log.d(TAG, "External audio source ${if (audioSource != null) "set" else "cleared"}")
     }
-    
+
     /**
-     * 设置 MediaProjectionService binder（供协议层使用）
+     * 设置音频捕获回调
      */
-    fun setMediaProjectionServiceBinder(binder: org.dpdns.sylw.videostreamer.MediaProjectionService.LocalBinder) {
-        currentConfig = currentConfig.copy(mediaProjectionServiceBinder = binder)
-//        Log.d(TAG, "MediaProjectionService binder set")
+    fun setAudioCaptureCallbacks(onStart: () -> Unit, onStop: () -> Unit) {
+        currentConfig = currentConfig.copy(
+            onAudioCaptureStart = onStart,
+            onAudioCaptureStop = onStop
+        )
     }
     
     /**
@@ -131,13 +115,6 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
      * @param url 推流地址（RTMP 等）
      */
     fun startStreaming(url: String) {
-        if (mediaProjection == null && !currentConfig.isCameraMode) {
-            val error = "MediaProjection 未初始化，请先请求授权"
-//            Log.e(TAG, error)
-            onError?.invoke(error)
-            return
-        }
-        
         if (protocol == null) {
             val error = "推流协议未初始化"
 //            Log.e(TAG, error)
@@ -147,8 +124,6 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
         
         // 构建完整配置
         val config = currentConfig.copy(
-            mediaProjection = mediaProjection,
-            mediaProjectionServiceBinder = currentConfig.mediaProjectionServiceBinder,
             externalAudioSource = currentConfig.externalAudioSource
         )
 
@@ -215,10 +190,6 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
          stopStreaming()
          protocol?.release()
          protocol = null
-
-         // 释放 MediaProjection（由 MediaProjectionService 自行管理生命周期）
-         mediaProjection = null
-         mediaProjectionManager = null
 
          //Log.d(TAG, "StreamManager released")
      }

@@ -21,7 +21,7 @@ interface IStreamingProtocol {
      * 开始摄像头模式推流（不需要 MediaProjection）
      *
      * @param url 推流地址
-     * @param config 推流配置（isCameraMode 会被强制设为 true）
+     * @param config 推流配置
      */
     fun startCameraMode(url: String, config: StreamingConfig)
 
@@ -97,11 +97,10 @@ data class StreamingConfig(
     val videoMode: String = "CBR",    // 🔥 新增：CBR 或 CQ
     val videoQuality: Int = 70,       // 🔥 新增：0-100
     val useAudio: Boolean = true,
+    val onAudioCaptureStart: (() -> Unit)? = null,
+    val onAudioCaptureStop: (() -> Unit)? = null,
     val audioSampleRate: Int = 48000,
     val audioChannelCount: Int = 2,
     val audioBitrate: Int = 128_000,   // 128 kbps
-    val mediaProjection: android.media.projection.MediaProjection? = null,
-    val mediaProjectionServiceBinder: org.dpdns.sylw.videostreamer.MediaProjectionService.LocalBinder? = null,
     val externalAudioSource: (() -> Pair<ByteArray, Long>?)? = null,  // 🔥 返回 PCM 数据和采集时间戳
-    val isCameraMode: Boolean = false  // 🔥 摄像头模式标志（跳过 MediaProjection / VirtualDisplay）
 )

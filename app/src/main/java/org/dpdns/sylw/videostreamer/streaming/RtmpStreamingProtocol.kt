@@ -30,13 +30,6 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
 //        Log.d(TAG, "Starting RTMP streaming to: $url")
 //        Log.d(TAG, "Config: ${config.width}x${config.height}, bitrate=${config.videoBitrate}, fps=${config.frameRate}")
 
-        // 非摄像头模式必须有 MediaProjection
-        if (!config.isCameraMode && config.mediaProjection == null) {
-            val error = "MediaProjection 未初始化"
-//            Log.e(TAG, error)
-            onError?.invoke(error)
-            return
-        }
 
         try {
             currentUrl = url
@@ -56,13 +49,8 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
                 audioChannelCount = config.audioChannelCount,
                 audioBitrate = config.audioBitrate,
                 externalAudioSource = config.externalAudioSource,
-                isCameraMode = config.isCameraMode,
                 onSurfaceReady
             ).apply {
-                // 仅录屏模式需要 MediaProjection
-                if (!config.isCameraMode) {
-                    config.mediaProjection?.let { setMediaProjection(it) }
-                }
 
                 // 转发状态回调
                 onStreamStateChanged = { isStreaming ->
@@ -87,12 +75,12 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
 
                 // 启动编码器（会创建 input surface 并开始推流）
                 start(url)
-//                Log.d(TAG, "RTMP encoder started successfully")
-                
-                // 启动音频采集
+
+                // 音频捕获启动回调
                 if (config.useAudio) {
-                    config.mediaProjectionServiceBinder?.toggleStreaming(true)
+                    config.onAudioCaptureStart?.invoke()
                 }
+//                Log.d(TAG, "RTMP encoder started successfully")
             }
 
         } catch (e: Exception) {
@@ -113,20 +101,17 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
     }
 
     override fun startCameraMode(url: String, config: StreamingConfig) {
-        start(url, config.copy(isCameraMode = true, mediaProjection = null))
+        start(url, config)
     }
 
     override fun stop() {
 //        Log.d(TAG, "Stopping RTMP streaming...")
 
         try {
-            // 停止音频采集（仅录屏模式）
+            // 音频捕获停止回调
             currentConfig?.let { config ->
-                if (!config.isCameraMode && config.useAudio) {
-                    config.mediaProjectionServiceBinder?.let { binder ->
-                        binder.stopAudioCapture()
-//                        Log.d(TAG, "🔇 Audio capture stopped")
-                    }
+                if (config.useAudio) {
+                    config.onAudioCaptureStop?.invoke()
                 }
             }
 

@@ -268,16 +268,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
     // 当绑定到 Service 时，设置外部音频源和 MediaProjection
     LaunchedEffect(mediaProjectionService) {
         mediaProjectionService?.let { binder ->
-            // 1. 传递 MediaProjection 给 StreamManager（关键！）
-            val projection = binder.getMediaProjection()
-            if (projection != null) {
-                streamManager?.setMediaProjection(projection)
-//                android.util.Log.d("VideoWindow", "MediaProjection passed to StreamManager")
-            } else {
-//                android.util.Log.e("VideoWindow", "MediaProjection is null in Service!")
-            }
-
-            // 2. 将 StreamManager 的旋转回调注册到 MediaProjectionService
+            // 1. 将 StreamManager 的旋转回调注册到 MediaProjectionService
             binder.onScreenRotation = { newWidth, newHeight ->
 //                android.util.Log.d("MediaProj", "Screen rotation detected: ${newWidth}x${newHeight}")
                 // 直接调用 StreamManager 的 updateResolution
@@ -311,9 +302,17 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             }
 //            android.util.Log.d("AudioCapture", "External audio source set from MediaProjectionService (with timestamp)")
 
-            // 4. 设置 MediaProjectionService binder 到 StreamManager（供协议层使用）
-            streamManager?.setMediaProjectionServiceBinder(binder)
-//            android.util.Log.d("VideoWindow", "MediaProjectionService binder configured in StreamManager")
+            // 5. 注入音频采集回调（协议层自动管理音频生命周期）
+            streamManager?.setAudioCaptureCallbacks(
+                onStart = {
+                    binder.setAudioCaptureMode(isVideoPush = true)
+                    binder.toggleStreaming(true)
+                },
+                onStop = {
+                    binder.stopAudioCapture()
+                }
+            )
+
         }
     }
 
@@ -426,10 +425,6 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                 )
 
 //                                android.util.Log.d("VideoWindow", "准备调用 toggleStreaming(true)")
-                                // 🔥 设置为视频推流音频模式（旋转时需要暂停）
-                                binder.setAudioCaptureMode(isVideoPush = true)
-                                // 开始录制
-                                binder.toggleStreaming(true)
 //                                android.util.Log.d("VideoWindow", "toggleStreaming(true) 调用完成")
                             }
                         }

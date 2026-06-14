@@ -89,9 +89,6 @@ class MediaProjectionService : Service() {
     inner class LocalBinder : Binder() {
         fun getService(): MediaProjectionService = this@MediaProjectionService
 
-        // 获取 MediaProjection 实例（用于传递给 SurfaceTextureEncoder）
-        fun getMediaProjection(): MediaProjection? = this@MediaProjectionService.mediaProjection
-
         // 获取屏幕实际物理分辨率（考虑了屏幕方向）
         fun getScreenRealSize() = this@MediaProjectionService.getScreenRealSize()
         
@@ -728,4 +725,3 @@ class MediaProjectionService : Service() {
         manager.createNotificationChannel(channel)
     }
 }
-

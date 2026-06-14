@@ -292,8 +292,7 @@ class CameraStreamManager(private val context: Context) {
                 iFrameInterval = 5,
                 videoMode = videoMode,
                 videoQuality = videoQuality,
-                useAudio = false,        // 摄像头模式不采集音频
-                isCameraMode = true
+                useAudio = false        // 摄像头模式不采集音频
             )
         ).apply {
             onStreamingStateChanged = { isStreaming ->
