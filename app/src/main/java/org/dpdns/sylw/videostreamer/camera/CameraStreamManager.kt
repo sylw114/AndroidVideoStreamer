@@ -11,6 +11,7 @@ import android.util.Size
 import android.view.Surface
 import androidx.annotation.RequiresPermission
 import android.app.Activity
+import android.media.MediaRecorder
 import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.StreamConfig
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
@@ -110,14 +111,22 @@ class CameraStreamManager(private val context: Context) {
     /**
      * 获取支持的分辨率列表
      */
-    private fun getSupportedSizes(characteristics: CameraCharacteristics?): List<Size> {
+    private fun getSupportedSizes(
+        characteristics: CameraCharacteristics?
+    ): List<Size> {
+
+        val configMap = characteristics?.get(
+            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
+        ) ?: return emptyList()
+
         return try {
-            val configMap = characteristics?.get(
-                CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
-            )
-            val sizes = configMap?.getOutputSizes(Surface::class.java)
-            sizes?.toList()?.sortedByDescending { it.width * it.height } ?: emptyList()
-        } catch (e: Exception) {
+            configMap
+                .getOutputSizes(MediaRecorder::class.java)
+                ?.distinctBy { "${it.width}x${it.height}" }
+                ?.sortedByDescending { it.width * it.height }
+                ?: emptyList()
+
+        } catch (_: Exception) {
             emptyList()
         }
     }
@@ -136,6 +145,7 @@ class CameraStreamManager(private val context: Context) {
             fpsRanges.map { it.upper }
                 .distinct()
                 .sorted()
+                .reversed()
         } catch (e: Exception) {
             listOf(30)
         }
