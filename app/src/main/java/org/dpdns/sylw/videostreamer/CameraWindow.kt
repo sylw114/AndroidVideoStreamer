@@ -193,9 +193,9 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         initCameraManager()
         
         // 加载全局配置
-        videoBitrate = loadBitrate(context)
-        videoMode = loadVideoMode(context)
-        videoQuality = loadVideoQuality(context)
+        videoBitrate = StreamConfig.getVideoBitrate()!!
+        videoMode = StreamConfig.getRateMode()!!
+        videoQuality = StreamConfig.getCqQuality()!!
     }
     
     // 🔥 当摄像头切换时，更新默认分辨率和帧率

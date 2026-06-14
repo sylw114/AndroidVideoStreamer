@@ -41,14 +41,7 @@ class CameraStreamManager(private val context: Context) {
     // 🔥 推流协议（仅通过接口访问，复用录屏页同一套编码器/RTMP 逻辑）
     private var streamManager: StreamManager? = null
 
-    // 当前配置
-    private var currentCameraId: String? = null
-    private var currentWidth: Int = 1920
-    private var currentHeight: Int = 1080
-    private var currentFrameRate: Int = 30
-    private var videoBitrate: Int = 2500_000
-    private var videoMode: String = "CBR"
-    private var videoQuality: Int = 70
+
 
     // 摄像头状态
     private var isCameraReady: Boolean = false
@@ -283,17 +276,17 @@ class CameraStreamManager(private val context: Context) {
             openCamera(cameraId, width, height, selectedFrameRate, surface)
         }
         streamManager = StreamManager(activity, {
-                onSurfaceReady(it)
-            }, StreamingConfig(
-                width = currentWidth,
-                height = currentHeight,
-                videoBitrate = videoBitrate,
-                frameRate = currentFrameRate,
-                iFrameInterval = 5,
-                videoMode = videoMode,
-                videoQuality = videoQuality,
-                useAudio = false        // 摄像头模式不采集音频
-            )
+            onSurfaceReady(it)
+        }, StreamingConfig(
+            width = width,
+            height = height,
+            videoBitrate = StreamConfig.getVideoBitrate()!!,
+            frameRate = selectedFrameRate,
+            iFrameInterval = 5,
+            videoMode = StreamConfig.getRateMode()!!,
+            videoQuality = StreamConfig.getCqQuality()!!,
+            useAudio = false        // 摄像头模式不采集音频
+        )
         ).apply {
             onStreamingStateChanged = { isStreaming ->
                 Log.d(TAG, "Streaming state changed: $isStreaming")
