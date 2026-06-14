@@ -255,8 +255,8 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 streamManager?.release()
                 streamManager = null
             
-                // 🔥 释放音频管理器
-                // 🔥 移除 tcpAudioManager 引用
+                mediaProjectionService?.stop()
+
                 // tcpAudioManager?.release()
                 // tcpAudioManager = null
                 udpAudioManager?.release()

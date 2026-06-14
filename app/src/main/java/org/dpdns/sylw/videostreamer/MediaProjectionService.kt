@@ -156,6 +156,9 @@ class MediaProjectionService : Service() {
         // 🔥 获取音频包大小（用于外部缓冲区分配）
         fun getAudioPacketSize(): Int = audioPacketSize
         
+        // 🔥 停止服务（释放投影、音频等全部资源）
+        fun stop() = this@MediaProjectionService.stopSelf()
+
         // 提供给外部获取音频数据的接口 - 使用环形缓冲区
         // 🔥 性能优化：提供直接读取到目标缓冲区的方法，避免 copyOf
         fun getAudioDataInto(targetBuffer: ByteArray, outTimestamp: LongArray? = null): Int {

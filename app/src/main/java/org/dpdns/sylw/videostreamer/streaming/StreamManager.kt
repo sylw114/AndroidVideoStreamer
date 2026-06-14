@@ -216,8 +216,7 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
          protocol?.release()
          protocol = null
 
-         // 释放 MediaProjection
-         mediaProjection?.stop()
+         // 释放 MediaProjection（由 MediaProjectionService 自行管理生命周期）
          mediaProjection = null
          mediaProjectionManager = null
 
