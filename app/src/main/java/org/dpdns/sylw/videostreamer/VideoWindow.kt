@@ -177,7 +177,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             onDispose {}
         } else {
             // 关键修复：设置全局 streaming 引用，让 SettingWindow 可以访问
-            streamManager = StreamManager(activity){ surface ->
+            streamManager = StreamManager(activity, { surface ->
                 mediaProjectionService?.let { binder ->
                     try {
                         val screenSize = binder.getScreenRealSize()
@@ -187,7 +187,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 //                            android.util.Log.e("VideoWindow", "✗ Failed to swap VirtualDisplay surface: ${e.message}")
                     }
                 }
-            }.apply {
+            }).apply {
                 onStreamingStateChanged = { streaming ->
                     isStreaming = streaming
 //                android.util.Log.d("VideoWindow", "Streaming state changed: $streaming")

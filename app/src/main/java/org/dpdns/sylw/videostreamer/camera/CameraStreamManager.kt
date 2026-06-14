@@ -10,10 +10,10 @@ import android.util.Log
 import android.util.Size
 import android.view.Surface
 import androidx.annotation.RequiresPermission
+import android.app.Activity
 import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.StreamConfig
-import org.dpdns.sylw.videostreamer.streaming.IStreamingProtocol
-import org.dpdns.sylw.videostreamer.streaming.RtmpStreamingProtocol
+import org.dpdns.sylw.videostreamer.streaming.StreamManager
 import org.dpdns.sylw.videostreamer.streaming.StreamingConfig
 
 /**
@@ -38,7 +38,7 @@ class CameraStreamManager(private val context: Context) {
     private var cameraHandler: Handler? = null
 
     // 🔥 推流协议（仅通过接口访问，复用录屏页同一套编码器/RTMP 逻辑）
-    private var protocol: IStreamingProtocol? = null
+    private var streamManager: StreamManager? = null
 
     // 当前配置
     private var currentCameraId: String? = null
@@ -266,21 +266,26 @@ class CameraStreamManager(private val context: Context) {
      */
     // TODO: 协议切换
     @SuppressLint("MissingPermission")
-    suspend fun startStreaming(rtmpUrl: String, cameraId: String, width: Int, height: Int, selectedFrameRate: Int) {
+    suspend fun startStreaming(rtmpUrl: String, cameraId: String, width: Int, height: Int, selectedFrameRate: Int, activity: Activity) {
         Log.d(TAG, "Starting RTMP streaming to: $rtmpUrl")
 
-        val proto = protocol
-        val protoName = StreamConfig.getStreamingProtocol()
         fun onSurfaceReady(surface: Surface) {
             openCamera(cameraId, width, height, selectedFrameRate, surface)
         }
-        protocol = when (protoName?.uppercase()) {
-            "RTMP" -> RtmpStreamingProtocol{ onSurfaceReady(it) }
-            else -> {
-                Log.w(TAG, "Unknown protocol: $protoName, fallback to RTMP")
-                RtmpStreamingProtocol{ onSurfaceReady(it) }
-            }
-        }.apply {
+        streamManager = StreamManager(activity, {
+                onSurfaceReady(it)
+            }, StreamingConfig(
+                width = currentWidth,
+                height = currentHeight,
+                videoBitrate = videoBitrate,
+                frameRate = currentFrameRate,
+                iFrameInterval = 5,
+                videoMode = videoMode,
+                videoQuality = videoQuality,
+                useAudio = false,        // 摄像头模式不采集音频
+                isCameraMode = true
+            )
+        ).apply {
             onStreamingStateChanged = { isStreaming ->
                 Log.d(TAG, "Streaming state changed: $isStreaming")
                 this@CameraStreamManager.onStreamingStateChanged?.invoke(isStreaming)
@@ -302,7 +307,7 @@ class CameraStreamManager(private val context: Context) {
                 }
             }
         }
-        if (proto == null) {
+        if (streamManager == null) {
             Log.e(TAG, "Protocol not initialized")
             onError?.invoke("推流协议未初始化，请先调用 init()")
             return
@@ -314,26 +319,9 @@ class CameraStreamManager(private val context: Context) {
         }
 
         try {
+            streamManager!!.init(StreamConfig.getStreamingProtocol()!!)
 
-            // 🔥 先配置 surface 回调：协议层创建好编码器 Surface 后，用它打开摄像头
-//            proto.onSurfaceReady = { surface ->
-//                Log.d(TAG, "Encoder surface ready, opening camera")
-//                cameraManagerRef.openCamera(cameraId, surface)
-//            }
-
-            val config = StreamingConfig(
-                width = currentWidth,
-                height = currentHeight,
-                videoBitrate = videoBitrate,
-                frameRate = currentFrameRate,
-                iFrameInterval = 5,
-                videoMode = videoMode,
-                videoQuality = videoQuality,
-                useAudio = false,        // 摄像头模式不采集音频
-                isCameraMode = true
-            )
-
-            proto!!.startCameraMode(rtmpUrl, config)
+            streamManager!!.startStreaming(rtmpUrl)
             Log.d(TAG, "Camera streaming requested via protocol")
 
         } catch (e: Exception) {
@@ -353,7 +341,7 @@ class CameraStreamManager(private val context: Context) {
             releaseCameraResources()
 
             // 再停止协议层（编码器 + RTMP）
-            protocol?.stop()
+            streamManager?.release()
             Log.d(TAG, "RTMP streaming stopped")
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping RTMP streaming", e)
@@ -364,7 +352,7 @@ class CameraStreamManager(private val context: Context) {
      * 检查是否正在推流
      */
     fun isStreaming(): Boolean {
-        return protocol?.isStreaming() ?: false
+        return streamManager?.isStreaming() ?: false
     }
 
     /**
@@ -403,8 +391,8 @@ class CameraStreamManager(private val context: Context) {
         stopStreaming()
 
         // 释放协议层
-        protocol?.release()
-        protocol = null
+        streamManager?.release()
+        streamManager = null
 
         // 停止后台线程
         cameraHandlerThread?.quitSafely()

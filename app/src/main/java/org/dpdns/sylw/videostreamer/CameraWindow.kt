@@ -153,7 +153,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 if(selectedCameraId != null){
                     val (width, height) = selectedResolution.split("x").map { it.toInt() }
-                    cameraManager?.startStreaming(rtmpUrl, selectedCameraId!!, width, height, selectedFrameRate)
+                    cameraManager?.startStreaming(rtmpUrl, selectedCameraId!!, width, height, selectedFrameRate, activity!!)
                 }
 
                 // 启动黑屏计时器

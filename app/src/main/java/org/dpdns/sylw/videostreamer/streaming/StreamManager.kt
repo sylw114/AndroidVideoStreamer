@@ -24,7 +24,7 @@ import android.media.projection.MediaProjectionManager
  * RtmpStreamingProtocol
  * ```
  */
-class StreamManager(private val activity: Activity, val onSurfaceReady: ((android.view.Surface) -> Unit)) {
+class StreamManager(private val activity: Activity, val onSurfaceReady: ((android.view.Surface) -> Unit), private var currentConfig: StreamingConfig = StreamingConfig()) {
     
     companion object {
         private const val TAG = "StreamManager"
@@ -37,9 +37,6 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
     // MediaProjection
     private var mediaProjection: MediaProjection? = null
     private var mediaProjectionManager: MediaProjectionManager? = null
-    
-    // 当前配置
-    private var currentConfig: StreamingConfig = StreamingConfig()
     
     // 状态回调
     var onStreamingStateChanged: ((Boolean) -> Unit)? = null
@@ -75,41 +72,8 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
         }
         
         // 初始化 MediaProjectionManager
-        mediaProjectionManager = activity.getSystemService(Activity.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-    }
-    
-    /**
-     * 开始录屏授权（必须在调用 startStreaming 之前）
-     */
-    fun requestScreenCapturePermission() {
-        if (mediaProjectionManager == null) {
-            init()
-        }
-        
-        val intent = mediaProjectionManager?.createScreenCaptureIntent()
-        activity.startActivityForResult(intent, REQUEST_CODE_SCREEN_CAPTURE)
-        
-//        Log.d(TAG, "Screen capture permission requested")
-    }
-    
-    /**
-     * 处理授权结果（在 onActivityResult 中调用）
-     */
-    fun handleActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
-        if (requestCode != REQUEST_CODE_SCREEN_CAPTURE) {
-            return false
-        }
-        
-        if (resultCode == Activity.RESULT_OK && data != null) {
-            mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
-            
-//            Log.d(TAG, "Screen capture permission granted")
-            return true
-        } else {
-//            Log.e(TAG, "Screen capture permission denied")
-            onError?.invoke("录屏授权被拒绝")
-            return false
-        }
+        if(!currentConfig.isCameraMode)
+            mediaProjectionManager = activity.getSystemService(Activity.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
     }
     
     /**
@@ -146,25 +110,6 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
     }
     
     /**
-     * 设置音频参数（便捷方法）
-     */
-    fun setAudioParams(
-        useAudio: Boolean,
-        sampleRate: Int = 48000,
-        channelCount: Int = 2,
-        bitrate: Int = 128000
-    ) {
-        currentConfig = currentConfig.copy(
-            useAudio = useAudio,
-            audioSampleRate = sampleRate,
-            audioChannelCount = channelCount,
-            audioBitrate = bitrate
-        )
-        
-//        Log.d(TAG, "Audio params updated: enabled=$useAudio, sampleRate=$sampleRate")
-    }
-    
-    /**
      * 设置外部音频源
      */
     fun setExternalAudioSource(audioSource: (() -> Pair<ByteArray, Long>?)?) {
@@ -186,7 +131,7 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
      * @param url 推流地址（RTMP 等）
      */
     fun startStreaming(url: String) {
-        if (mediaProjection == null) {
+        if (mediaProjection == null && !currentConfig.isCameraMode) {
             val error = "MediaProjection 未初始化，请先请求授权"
 //            Log.e(TAG, error)
             onError?.invoke(error)
@@ -206,7 +151,7 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
             mediaProjectionServiceBinder = currentConfig.mediaProjectionServiceBinder,
             externalAudioSource = currentConfig.externalAudioSource
         )
-        
+
 //        Log.d(TAG, "Starting streaming with protocol: ${protocol?.javaClass?.simpleName}")
         protocol?.start(url, config)
     }
@@ -225,33 +170,7 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
     fun isStreaming(): Boolean {
         return protocol?.isStreaming() ?: false
     }
-    
-    /**
-     * 切换推流地址
-     */
-    fun switchUrl(newUrl: String) {
-//        Log.d(TAG, "Switching URL to: $newUrl")
-        protocol?.switchUrl(newUrl)
-    }
-    
-    /**
-     * 动态更新码率
-     */
-    fun updateBitrate(bitrate: Int) {
-//        Log.d(TAG, "Updating bitrate to: $bitrate")
-        protocol?.updateBitrate(bitrate)
-        currentConfig = currentConfig.copy(videoBitrate = bitrate)
-    }
-    
-    /**
-     * 动态更新帧率
-     */
-    fun updateFrameRate(frameRate: Int) {
-//        Log.d(TAG, "Updating frame rate to: $frameRate")
-        protocol?.updateFrameRate(frameRate)
-        currentConfig = currentConfig.copy(frameRate = frameRate)
-    }
-    
+
     /**
      * 更新分辨率（屏幕旋转时调用）
      */
@@ -279,21 +198,7 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
         startStreaming(currentUrl)
 //        Log.d(TAG, "Resolution update completed")
     }
-    
-    /**
-     * 切换推流协议
-     * 
-     * @param newProtocol 新协议名称（目前仅支持 RTMP）
-     */
-    fun switchProtocol(newProtocol: String) {
-        if (newProtocol.uppercase() != "RTMP") {
-//            Log.w(TAG, "Only RTMP protocol is supported, ignoring switch to: $newProtocol")
-            return
-        }
-        
-//        Log.d(TAG, "Protocol remains RTMP (no switch needed)")
-    }
-    
+
     /**
      * 获取当前推流地址
      */
