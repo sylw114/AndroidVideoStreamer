@@ -72,21 +72,20 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     
     // 黑屏计时器 Job（用于取消）
     var blackScreenJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+
+    var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     
     // 权限请求
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            // 权限已授予，刷新摄像头列表
-            cameraManager?.let {
-                availableCameras = it.getAvailableCameras()
-                if (availableCameras.isNotEmpty()) {
-                    selectedCameraId = availableCameras.first().cameraId
-                }
-            }
+            pendingAction?.invoke()
+            pendingAction = null
         } else {
             errorMessage = cameraPermissionRequiredText
+            // 授权窗口关闭后未授权，Toast 提示
+            Toast.makeText(context, cameraPermissionRequiredText, Toast.LENGTH_LONG).show()
         }
     }
     
@@ -125,47 +124,51 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             // 取消屏幕常亮
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
-            selectedCameraId?.let { cameraId ->
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-                    val (width, height) = selectedResolution.split("x").map { it.toInt() }
-//                    android.util.Log.d("CameraWindow", "Starting camera: $cameraId, ${width}x${height}, ${selectedFrameRate}fps")
-                } else {
-                    // 请求权限
-                    permissionLauncher.launch(Manifest.permission.CAMERA)
-                }
-            }
+            fun startStreaming() {
+                scope.launch {
+                    val rtmpUrl = loadUrl(context)
+                    if (rtmpUrl.isNullOrEmpty()) {
+                        errorMessage = rtmpUrlRequiredText
+                        Toast.makeText(context, rtmpUrlRequiredText, Toast.LENGTH_LONG).show()
+                        return@launch
+                    }
+                    // 验证 URL 格式
+                    if (!rtmpUrl.startsWith("rtmp://")) {
+                        val error = context.getString(R.string.error_invalid_rtmp_url, rtmpUrl)
+                        errorMessage = error
+                        Toast.makeText(context, error, Toast.LENGTH_LONG).show()
+                        return@launch
+                    }
+                    // 设置屏幕常亮
+                    activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    if (selectedCameraId != null) {
+                        val (width, height) = selectedResolution.split("x").map { it.toInt() }
+                        cameraManager?.startStreaming(
+                            rtmpUrl,
+                            selectedCameraId!!,
+                            width,
+                            height,
+                            selectedFrameRate,
+                            activity!!
+                        )
+                    }
 
-            scope.launch {
-                val rtmpUrl = loadUrl(context)
-                if (rtmpUrl.isNullOrEmpty()) {
-                    errorMessage = rtmpUrlRequiredText
-                    Toast.makeText(context, rtmpUrlRequiredText, Toast.LENGTH_LONG).show()
-                    return@launch
-                }
-                // 验证 URL 格式
-                if (!rtmpUrl.startsWith("rtmp://")) {
-                    val error = context.getString(R.string.error_invalid_rtmp_url, rtmpUrl)
-                    errorMessage = error
-                    Toast.makeText(context, error, Toast.LENGTH_LONG).show()
-                    return@launch
-                }
-                // 设置屏幕常亮
-                activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                if(selectedCameraId != null){
-                    val (width, height) = selectedResolution.split("x").map { it.toInt() }
-                    cameraManager?.startStreaming(rtmpUrl, selectedCameraId!!, width, height, selectedFrameRate, activity!!)
-                }
-
-                // 启动黑屏计时器
-                blackScreenJob?.cancel()
-                isBlackScreenMode = false
-                blackScreenJob = scope.launch {
-                    kotlinx.coroutines.delay(30_000)
-                    if (isStreaming) {
-                        isBlackScreenMode = true
+                    // 启动黑屏计时器
+                    blackScreenJob?.cancel()
+                    isBlackScreenMode = false
+                    blackScreenJob = scope.launch {
+                        kotlinx.coroutines.delay(30_000)
+                        if (isStreaming) {
+                            isBlackScreenMode = true
+                        }
                     }
                 }
             }
+            // 检查摄像头权限，未授权则弹出授权窗口并停止后续操作
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                pendingAction = ::startStreaming
+                permissionLauncher.launch(Manifest.permission.CAMERA)
+            } else startStreaming()
         }
     }
     
