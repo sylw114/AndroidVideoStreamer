@@ -35,6 +35,7 @@
     <string name="video_start_audio">开始音频</string>
     <string name="video_stop_audio_with_latency">停止音频 (延迟: %1$s)</string>
     <string name="video_export_latency">导出延迟</string>
+    <string name="video_connecting">连接中…</string>
 
     <string name="camera_current_config">当前配置：</string>
     <string name="camera_bitrate_value">码率: %1$d kbps</string>

@@ -35,6 +35,7 @@
     <string name="video_start_audio">Start Audio</string>
     <string name="video_stop_audio_with_latency">Stop Audio (Lat: %1$s)</string>
     <string name="video_export_latency">Export Latency</string>
+    <string name="video_connecting">Connecting…</string>
 
     <string name="camera_current_config">Current Configuration:</string>
     <string name="camera_bitrate_value">Bitrate: %1$d kbps</string>

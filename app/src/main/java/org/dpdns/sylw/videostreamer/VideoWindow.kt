@@ -33,6 +33,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
 import org.dpdns.sylw.videostreamer.udpAudio.UdpAudioManager
+import org.dpdns.sylw.videostreamer.ui.components.SafeButton
+import org.dpdns.sylw.videostreamer.ui.components.SafeButtonState
 
 
 // 视频窗口
@@ -48,11 +50,13 @@ fun VideoWindow(modifier: Modifier = Modifier) {
     // 推流管理器
     var streamManager by remember { mutableStateOf<StreamManager?>(null) }
     var isStreaming by remember { mutableStateOf(false) }
+    var isPending by remember { mutableStateOf(false) }
     
     // 🔥 TCP音频管理器 (已移除)
     // var tcpAudioManager by remember { mutableStateOf<TcpAudioManager?>(null) }
     var udpAudioManager by remember { mutableStateOf<UdpAudioManager?>(null) }
     var isUdpAudioStreaming by remember { mutableStateOf(false) }
+    var isUdpAudioPending by remember { mutableStateOf(false) }
     var currentLatency by remember { mutableStateOf<Pair<Long, Long>?>(null) }
     
     // 从全局配置读取推流 URL（使用可变状态）
@@ -182,20 +186,19 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     try {
                         val screenSize = binder.getScreenRealSize()
                         binder.updateVirtualDisplaySurface(surface, screenSize.x, screenSize.y)
-//                            android.util.Log.d("VideoWindow", "✓ VirtualDisplay surface swapped to encoder input")
                     } catch (e: Exception) {
-//                            android.util.Log.e("VideoWindow", "✗ Failed to swap VirtualDisplay surface: ${e.message}")
                     }
                 }
             }).apply {
                 onStreamingStateChanged = { streaming ->
                     isStreaming = streaming
-//                android.util.Log.d("VideoWindow", "Streaming state changed: $streaming")
+                    isPending = false  // 连接完成或断开，清除 pending
                 }
 
                 onError = { error ->
 //                android.util.Log.e("VideoWindow", "Stream error: $error")
                     // 🔥 确保在主线程显示 Toast，避免后台线程崩溃
+                    isPending = false
                     kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
                         Toast.makeText(context, error, Toast.LENGTH_LONG).show()
                     }
@@ -238,12 +241,14 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             udpAudioManager = UdpAudioManager().apply {
                 onConnectionStateChanged = { connected ->
                     isUdpAudioStreaming = connected
+                    isUdpAudioPending = false  // 连接完成或断开，清除 pending
                     if (!connected) currentLatency = null
                 }
                 onLatencyUpdated = { min, max ->
                     currentLatency = Pair(min, max)
                 }
                 onError = { error ->
+                    isUdpAudioPending = false
                     // 🔥 确保在主线程显示 Toast，避免后台线程崩溃
                     kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
                         Toast.makeText(context, error, Toast.LENGTH_LONG).show()
@@ -445,7 +450,10 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     }
                 )
             }
-            Button(
+            SafeButton(
+                isPending = isPending,
+                isActive = isStreaming,
+                enabled = isAuthorized,
                 onClick = {
                     // 使用新的推流管理器进行推流
                     streamManager?.let { manager ->
@@ -453,9 +461,8 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                             // 停止推流 - 在后台线程执行
                             kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
                                 manager.stopStreaming()
-//                                android.util.Log.d("VideoWindow", "Stopped streaming")
                             }
-                        } else {
+                        } else if (!isPending) {
                             // 开始推流
                             val rtmpUrl = currentRtmpUrl
                             if (rtmpUrl.isNullOrEmpty()) {
@@ -474,8 +481,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                 val actualWidth = screenSize.x
                                 val actualHeight = screenSize.y
 
-//                                    android.util.Log.d("VideoWindow", "推流分辨率：${actualWidth}x${actualHeight}")
-//                                    android.util.Log.d("VideoWindow", "=== 配置结束 ===")
+                                isPending = true  // 进入连接中状态
 
                                 // 在后台线程启动推流，避免 NetworkOnMainThreadException
                                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -483,12 +489,6 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                         // 加载保存的码率和帧率
                                         val savedBitrate = loadBitrate(context)
                                         val savedFrameRate = loadFrameRate(context)
-
-                                        // 使用 MediaProjectionService 的实际分辨率
-                                        val screenSize = binder.getScreenRealSize()
-                                        val actualWidth = screenSize.x
-                                        val actualHeight = screenSize.y
-//                                            android.util.Log.d("VideoWindow", "Starting RTMP streaming: ${actualWidth}x${actualHeight}, bitrate=$savedBitrate, fps=$savedFrameRate to: $rtmpUrl")
 
                                         // 设置视频参数（使用实际分辨率和保存的帧率）
                                         manager.setVideoParams(
@@ -502,9 +502,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                         )
 
                                         manager.startStreaming(rtmpUrl)
-//                                            android.util.Log.d("VideoWindow", "Started streaming to: $rtmpUrl")
                                     } catch (e: Exception) {
-//                                            android.util.Log.e("VideoWindow", "Failed to start streaming", e)
                                         // 在主线程显示错误
                                         withContext(kotlinx.coroutines.Dispatchers.Main) {
                                             manager.onError?.invoke(context.getString(R.string.error_start_stream_failed, e.message ?: ""))
@@ -512,24 +510,19 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                     }
                                 }
                             } ?: run {
-//                                    android.util.Log.e("VideoWindow", "MediaProjectionService not bound!")
+                                isPending = false
                             }
                         }
                     }
                 },
                 modifier = Modifier.weight(1f),
-                enabled = isAuthorized,
-                colors = if (isStreaming) {
-                    ButtonDefaults.buttonColors(containerColor = Color(0xFFF44336))
-                } else {
-                    ButtonDefaults.buttonColors()
-                }
-            ) {
+                activeContainerColor = Color(0xFFF44336),
+            ) { state ->
                 Text(
-                    if (isStreaming) {
-                        stringResource(R.string.video_stop_streaming)
-                    } else {
-                        stringResource(R.string.video_start_streaming)
+                    when (state) {
+                        SafeButtonState.IDLE -> stringResource(R.string.video_start_streaming)
+                        SafeButtonState.PENDING -> stringResource(R.string.video_connecting)
+                        SafeButtonState.ACTIVE -> stringResource(R.string.video_stop_streaming)
                     }
                 )
             }
@@ -540,11 +533,14 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Button(
+            SafeButton(
+                isPending = isUdpAudioPending,
+                isActive = isUdpAudioStreaming,
+                enabled = isAuthorized,
                 onClick = {
                     if (isUdpAudioStreaming) {
                         udpAudioManager?.stop()
-                    } else {
+                    } else if (!isUdpAudioPending) {
                         scope.launch {
                             val ip = loadUdpAudioIp(context)
                             // 🔥 前置校验 IP 有效性
@@ -564,6 +560,9 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                 val config = binder.getService().config
                                 binder.setAudioCaptureMode(isVideoPush = false)
                                 udpAudioManager?.updateConfig(ip, tcpPort, udpPort, true)
+
+                                isUdpAudioPending = true  // 进入连接中状态
+
                                 val recordEnabled = StreamConfig.getLatencyRecordingEnabled() ?: false
                                 val logFile = if (recordEnabled) java.io.File(context.filesDir, "latency_log.txt") else null
                                 udpAudioManager?.start(config, logFile, recordEnabled, latencyLogHeaderText)
@@ -572,19 +571,14 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                     }
                 },
                 modifier = Modifier.weight(1f),
-                enabled = isAuthorized,
-                colors = if (isUdpAudioStreaming) {
-                    ButtonDefaults.buttonColors(containerColor = Color(0xFF2196F3))
-                } else {
-                    ButtonDefaults.buttonColors()
-                }
-            ) {
+                activeContainerColor = Color(0xFF2196F3),
+            ) { state ->
                 val latText = currentLatency?.let { "${it.first}-${it.second}ms" } ?: "--"
                 Text(
-                    if (isUdpAudioStreaming) {
-                        stringResource(R.string.video_stop_audio_with_latency, latText)
-                    } else {
-                        stringResource(R.string.video_start_audio)
+                    when (state) {
+                        SafeButtonState.IDLE -> stringResource(R.string.video_start_audio)
+                        SafeButtonState.PENDING -> stringResource(R.string.video_connecting)
+                        SafeButtonState.ACTIVE -> stringResource(R.string.video_stop_audio_with_latency, latText)
                     }
                 )
             }

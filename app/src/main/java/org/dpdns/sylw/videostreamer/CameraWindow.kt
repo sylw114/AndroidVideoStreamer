@@ -24,6 +24,8 @@ import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
 import org.dpdns.sylw.videostreamer.camera.CameraStreamManager
 import org.dpdns.sylw.videostreamer.ui.theme.VideoStreamerTheme
+import org.dpdns.sylw.videostreamer.ui.components.SafeButton
+import org.dpdns.sylw.videostreamer.ui.components.SafeButtonState
 
 /**
  * Camera 推流页面
@@ -49,6 +51,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
 
     // 状态管理
     var isStreaming by remember { mutableStateOf(false) }
+    var isPending by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     
     // 配置选项
@@ -103,9 +106,11 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             // 🔥 推流状态
             onStreamingStateChanged = { streaming ->
                 isStreaming = streaming
+                isPending = false  // 连接完成或断开，清除 pending
             }
 
             onError = { error ->
+                isPending = false
                 errorMessage = error
                 // 🔥 确保在主线程显示 Toast，避免后台线程崩溃
                 kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
@@ -123,17 +128,20 @@ fun CameraWindow(modifier: Modifier = Modifier) {
 
             // 取消屏幕常亮
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        } else {
+        } else if (!isPending) {
             fun startStreaming() {
+                isPending = true  // 进入连接中状态
                 scope.launch {
                     val rtmpUrl = loadUrl(context)
                     if (rtmpUrl.isNullOrEmpty()) {
+                        isPending = false
                         errorMessage = rtmpUrlRequiredText
                         Toast.makeText(context, rtmpUrlRequiredText, Toast.LENGTH_LONG).show()
                         return@launch
                     }
                     // 验证 URL 格式
                     if (!rtmpUrl.startsWith("rtmp://")) {
+                        isPending = false
                         val error = context.getString(R.string.error_invalid_rtmp_url, rtmpUrl)
                         errorMessage = error
                         Toast.makeText(context, error, Toast.LENGTH_LONG).show()
@@ -151,6 +159,8 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                             selectedFrameRate,
                             activity!!
                         )
+                    } else {
+                        isPending = false
                     }
 
                     // 启动黑屏计时器
@@ -391,18 +401,20 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 }
                 
                 // 开始/停止推流（点击时一并启动摄像头，或停止时一并关闭摄像头）
-                Button(
+                SafeButton(
+                    isPending = isPending,
+                    isActive = isStreaming,
+                    enabled = true,
                     onClick = ::toggleStreaming,
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (isStreaming) Color.Red else Color.Green
-                    )
-                ) {
+                    activeContainerColor = Color.Red,
+                    inactiveContainerColor = Color.Green,
+                ) { state ->
                     Text(
-                        if (isStreaming) {
-                            stringResource(R.string.video_stop_streaming)
-                        } else {
-                            stringResource(R.string.video_start_streaming)
+                        when (state) {
+                            SafeButtonState.IDLE -> stringResource(R.string.video_start_streaming)
+                            SafeButtonState.PENDING -> stringResource(R.string.video_connecting)
+                            SafeButtonState.ACTIVE -> stringResource(R.string.video_stop_streaming)
                         }
                     )
                 }
