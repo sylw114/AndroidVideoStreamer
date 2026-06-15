@@ -607,6 +607,10 @@ class RtmpPusher {
             eofStream?.read()
          })
 
+        val cleanThread = Thread{
+            disconnect()
+        }
+
         sendThread = Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
 
@@ -691,6 +695,7 @@ class RtmpPusher {
                 }
             }
 //            Log.d(TAG, "Send thread exited")
+            cleanThread.start()
         }, "RtmpSendThread")
         
         sendThread?.start()
@@ -1310,18 +1315,6 @@ class RtmpPusher {
     fun disconnect() {
         // 停止发送线程
         stopSendThread()
-        eofStream?.markEof()
-
-        if (!isConnected) {
-            try {
-                socket?.close()
-            } catch (e: Exception) {
-//                Log.w(TAG, "Error closing socket: ${e.message}")
-            }
-            socket = null
-            eofStream = null
-            return
-        }
 
         try {
             // Standard RTMP disconnection sequence
