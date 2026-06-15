@@ -1,10 +1,12 @@
 package org.dpdns.sylw.videostreamer.udpAudio
 
+import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.util.Log
 import kotlinx.coroutines.*
+import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.StreamConfig
 import java.io.File
 import java.net.DatagramPacket
@@ -70,6 +72,7 @@ class UdpAudioManager {
     }
 
     fun start(
+        context: Context,
         audioConfig: AudioPlaybackCaptureConfiguration?,
         logFile: File? = null,
         recordEnabled: Boolean = false,
@@ -139,7 +142,7 @@ class UdpAudioManager {
                 startAudioCapture(audioConfig)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start dual-protocol audio: ${e.message}")
-                onError?.invoke("启动失败: ${e.message}")
+                onError?.invoke(context.getString(R.string.error_audio_start_failed, e.message ?: ""))
                 disconnect()
             }
         }
@@ -319,22 +322,6 @@ class UdpAudioManager {
             }
             if (isConnected) stop()
         }
-    }
-
-    fun getLatencyRecords(): List<LatencyRecord> = synchronized(latencyRecords) { latencyRecords.toList() }
-
-    fun exportLatencyRecords(): String {
-        val records = getLatencyRecords()
-        if (records.isEmpty()) return "暂无延迟记录"
-        val sb = StringBuilder()
-        sb.appendLine("延迟记录 (共${records.size}条)")
-        sb.appendLine("包序号\t最小(ms)\t最大(ms)")
-        records.forEach { sb.appendLine("${it.seq}\t${it.minLatency}\t${it.maxLatency}") }
-        val allMin = records.minOf { it.minLatency }
-        val allMax = records.maxOf { it.maxLatency }
-        sb.appendLine("---")
-        sb.appendLine("全局最小: ${allMin}ms  全局最大: ${allMax}ms")
-        return sb.toString()
     }
 
     private fun audioCaptureLoop(bufferSize: Int) {

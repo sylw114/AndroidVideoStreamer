@@ -50,6 +50,8 @@
     <string name="camera_resolution">Resolution</string>
     <string name="camera_frame_rate">Frame Rate</string>
     <string name="camera_start_camera">Start Camera</string>
+    <string name="error_camera_list_failed">Failed to get camera list: %1$s</string>
+    <string name="error_audio_start_failed">Failed to start audio: %1$s</string>
     <string name="camera_stop_camera">Stop Camera</string>
 
     <string name="latency_no_records">No latency records</string>

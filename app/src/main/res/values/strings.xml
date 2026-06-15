@@ -51,6 +51,8 @@
     <string name="camera_frame_rate">帧率</string>
     <string name="camera_start_camera">启动摄像头</string>
     <string name="camera_stop_camera">停止摄像头</string>
+    <string name="error_camera_list_failed">无法获取摄像头列表：%1$s</string>
+    <string name="error_audio_start_failed">启动音频失败：%1$s</string>
 
     <string name="latency_no_records">暂无延迟记录</string>
     <string name="latency_log_header">包序号\t最小(ms)\t最大(ms)\n</string>

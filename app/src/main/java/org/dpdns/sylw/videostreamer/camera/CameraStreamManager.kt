@@ -95,7 +95,7 @@ class CameraStreamManager(private val context: Context) {
             }
         } catch (e: Exception) {
 //            Log.e(TAG, "Failed to get available cameras", e)
-            onError?.invoke("获取摄像头列表失败: ${e.message}")
+            onError?.invoke(context.getString(R.string.error_camera_list_failed, e.message ?: ""))
         }
 
         return cameras

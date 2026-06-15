@@ -565,7 +565,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 
                                 val recordEnabled = StreamConfig.getLatencyRecordingEnabled() ?: false
                                 val logFile = if (recordEnabled) java.io.File(context.filesDir, "latency_log.txt") else null
-                                udpAudioManager?.start(config, logFile, recordEnabled, latencyLogHeaderText)
+                                udpAudioManager?.start(context, config, logFile, recordEnabled, latencyLogHeaderText)
                             }
                         }
                     }
