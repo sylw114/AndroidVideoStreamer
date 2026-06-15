@@ -72,6 +72,9 @@ class RtmpPusher {
     private var audioSpecificConfig: ByteArray? = null // AAC config data (from MediaCodec csd-0)
     private var audioSequenceHeaderSent = false
     private var audioOutputFrameCount = 0L // 已发送的音频帧数
+
+    @Volatile
+    var isCleaningUp = false // 标记是否正在清理资源，避免重复调用 disconnect
     
     /**
      * 🔥 设置 AudioSpecificConfig（从 MediaCodec 音频编码器的 csd-0 提取）
@@ -608,7 +611,8 @@ class RtmpPusher {
          })
 
         val cleanThread = Thread{
-            disconnect()
+            if(!isCleaningUp)
+                disconnect()
         }
 
         sendThread = Thread({
@@ -1313,6 +1317,7 @@ class RtmpPusher {
     }
 
     fun disconnect() {
+        isCleaningUp = true
         // 停止发送线程
         stopSendThread()
 
