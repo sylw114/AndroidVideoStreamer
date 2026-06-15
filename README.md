@@ -8,6 +8,7 @@ VideoStreamer 是一个专为 Android 设备设计的视频流媒体应用，旨
 - **高分辨率支持**：默认原生分辨率
 - **易于集成**：兼容 OBS 等流媒体软件，便于直播和录制。
 - **支持的输入**： 屏幕捕获，摄像头录制
+- **低延迟音频流**：搭配[指定程序](https://github.com/sylw114/LiveSuite)可以低延迟的把内录音频推送到电脑播放，测试设备上约90ms延迟。
 
 ## 为什么不选择 scrcpy
 
@@ -34,7 +35,7 @@ VideoStreamer 是一个专为 Android 设备设计的视频流媒体应用，旨
 
 ### 搭配obs
 
-你可以自行实现服务端，也可以参考这个Node.js的简单实现：
+你可以自行实现服务端，或者使用我们的GUI客户端[LiveSuite](https://github.com/sylw114/LiveSuite)，也可以参考这个Node.js的简单实现：
 
 ```javascript
 import NodeMediaServer from 'node-media-server';
@@ -67,4 +68,8 @@ nms.on('donePublish', (sessions) => {
 
 ## 已知问题
 
-长时间使用可能把音频内录干崩，干崩了就只有重启内录才有声音了
+~~长时间使用可能把音频内录干崩，干崩了就只有重启内录才有声音了~~我也不知道是不是我的问题了，因为试了下居然其它应用还有声，并且重启也没用。
+
+## 相关项目
+- [LiveSuite](https://github.com/sylw114/LiveSuite)GUI客户端，包含rtmp流服务器和音频服务器程序，可以完整搭配使用
+- [udp-audio-server](https://github.com/sylw114/udp-audio-server)音频程序本体
