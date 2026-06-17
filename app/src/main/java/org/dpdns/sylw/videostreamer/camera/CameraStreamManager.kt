@@ -7,11 +7,13 @@ import android.hardware.camera2.*
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import android.view.Surface
 import androidx.annotation.RequiresPermission
 import android.app.Activity
 import android.media.MediaRecorder
+import android.graphics.ImageFormat
 import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.StreamConfig
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
@@ -46,6 +48,9 @@ class CameraStreamManager(private val context: Context) {
     // 摄像头状态
     private var isCameraReady: Boolean = false
 
+    // 当前选中的摄像头配置（用于 CaptureRequest / 高速模式判断）
+    private var cameraConfig: CameraConfig? = null
+
     // 状态回调
     var onCameraReady: ((Boolean) -> Unit)? = null
     var onStreamingStateChanged: ((Boolean) -> Unit)? = null
@@ -69,6 +74,17 @@ class CameraStreamManager(private val context: Context) {
 
     /**
      * 获取可用的摄像头列表
+     *
+     * 每个摄像头返回一个 CameraInfo，其中包含按帧率索引的分辨率列表。
+     * 帧率选项来源于：
+     * - CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES（标准帧率 ≤30fps）
+     * - getOutputMinFrameDuration（中高帧率 60fps）
+     * - getHighSpeedVideoFpsRanges（高速帧率 ≥120fps）
+     *
+     * 分辨率过滤逻辑：
+     * - 标准帧率（≤30fps）：使用全部 MediaRecorder 输出尺寸
+     * - 中高帧率（60fps）：仅 minFrameDuration 允许该帧率的分辨率
+     * - 高速帧率（≥120fps）：仅 getHighSpeedVideoSizes 中的分辨率
      */
     fun getAvailableCameras(): List<CameraInfo> {
         val cameras = mutableListOf<CameraInfo>()
@@ -84,12 +100,7 @@ class CameraStreamManager(private val context: Context) {
                 if (lensFacing == CameraCharacteristics.LENS_FACING_BACK ||
                     lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
 
-                    val info = CameraInfo(
-                        cameraId = cameraId,
-                        isFront = lensFacing == CameraCharacteristics.LENS_FACING_FRONT,
-                        supportedSizes = getSupportedSizes(characteristics),
-                        supportedFrameRates = getSupportedFrameRates(characteristics)
-                    )
+                    val info = buildCameraInfo(cameraId, characteristics!!)
                     cameras.add(info)
                 }
             }
@@ -102,54 +113,112 @@ class CameraStreamManager(private val context: Context) {
     }
 
     /**
-     * 获取支持的分辨率列表
+     * 构建单个摄像头的 CameraInfo（含按帧率索引的分辨率）
      */
-    private fun getSupportedSizes(
-        characteristics: CameraCharacteristics?
-    ): List<Size> {
+    private fun buildCameraInfo(cameraId: String, c: CameraCharacteristics): CameraInfo {
+        val isFront = c.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+        val configMap = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
 
-        val configMap = characteristics?.get(
-            CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP
-        ) ?: return emptyList()
+        // 1. 所有 MediaRecorder 输出尺寸（按面积降序）
+        val allSizes: List<Size> = configMap?.getOutputSizes(MediaRecorder::class.java)
+            ?.toList()
+            ?.distinctBy { "${it.width}x${it.height}" }
+            ?.sortedByDescending { it.width * it.height }
+            ?: emptyList()
 
-        return try {
-            configMap
-                .getOutputSizes(MediaRecorder::class.java)
-                ?.distinctBy { "${it.width}x${it.height}" }
-                ?.sortedByDescending { it.width * it.height }
-                ?: emptyList()
-
-        } catch (_: Exception) {
-            emptyList()
+        if (allSizes.isEmpty()) {
+            return CameraInfo(cameraId = cameraId, isFront = isFront, fpsToSizes = emptyMap())
         }
-    }
 
-    /**
-     * 获取支持的帧率范围
-     */
-    private fun getSupportedFrameRates(characteristics: CameraCharacteristics?): List<Int> {
-        if (characteristics == null) return listOf(30)
+        // 2. 收集所有可用的帧率值
+        val fpsSet = mutableSetOf<Int>()
 
-        return try {
-            val fpsRanges = characteristics.get(
-                CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
-            ) ?: return listOf(30)
+        // 2a. 从 AE 范围收集标准帧率
+        val aeRanges = c.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+        aeRanges?.forEach { fpsSet.add(it.upper) }
 
-            fpsRanges.map { it.upper }
-                .distinct()
-                .sorted()
-                .reversed()
-        } catch (e: Exception) {
-            listOf(30)
+        // 2b. 从 minFrameDuration 计算中高帧率
+        for (size in allSizes) {
+            val minDur = configMap?.getOutputMinFrameDuration(ImageFormat.YUV_420_888, size)
+            if (minDur != null && minDur > 0) {
+                val maxFps = (1_000_000_000L / minDur).toInt()
+                if (maxFps > 30 && maxFps <= 240) {
+                    fpsSet.add(maxFps)
+                }
+            }
         }
+
+        // 2c. 从高速度视频收集
+        val highSpeedRanges = configMap?.getHighSpeedVideoFpsRanges()
+        if (highSpeedRanges != null) {
+            for (range in highSpeedRanges) {
+                if (range.upper >= 120) fpsSet.add(range.upper)
+            }
+        }
+
+        // 收集所有高速度视频尺寸（Set 加速查找）
+        val highSpeedSizes = configMap?.getHighSpeedVideoSizes()?.toSet() ?: emptySet()
+
+        // 3. 构建 fps → sizes 映射
+        val fpsToSizes = mutableMapOf<Int, List<Size>>()
+
+        for (fps in fpsSet.filter { it > 0 }.sortedDescending()) {
+            val sizes = when {
+                // 高速帧率（≥120fps）：仅高速度视频尺寸
+                fps >= 120 -> {
+                    val candidates = mutableListOf<Size>()
+                    val hsRanges = configMap?.getHighSpeedVideoFpsRanges()
+                    for (hsSize in highSpeedSizes) {
+                        // 检查该尺寸是否支持目标帧率
+                        var supported = false
+                        if (hsRanges != null) {
+                            for (r in hsRanges) {
+                                // 如果范围包含 fps 或者范围上界 == fps
+                                if (r.lower <= fps && r.upper >= fps) {
+                                    supported = true
+                                    break
+                                }
+                            }
+                        } else {
+                            // 没有具体范围信息，只要在高速尺寸列表就认为支持
+                            supported = true
+                        }
+                        if (supported) {
+                            candidates.add(hsSize)
+                        }
+                    }
+                    candidates.sortedByDescending { it.width * it.height }
+                }
+                // 高帧率（60fps）：minFrameDuration 允许的尺寸
+                fps > 30 -> {
+                    allSizes.filter { size ->
+                        val minDur = configMap?.getOutputMinFrameDuration(ImageFormat.YUV_420_888, size)
+                        minDur != null && minDur > 0 && (1_000_000_000L / minDur) >= fps
+                    }
+                }
+                // 标准帧率（≤30fps）：全部尺寸
+                else -> allSizes
+            }
+            if (sizes.isNotEmpty()) {
+                fpsToSizes[fps] = sizes
+            }
+        }
+
+        return CameraInfo(
+            cameraId = cameraId,
+            isFront = isFront,
+            fpsToSizes = fpsToSizes
+        )
     }
 
     /**
      * 打开摄像头（仅打开 Camera2 设备，不创建编码器，也不创建 CaptureSession）
      */
     @RequiresPermission(Manifest.permission.CAMERA)
-    fun openCamera(cameraId: String, width: Int, height: Int, frameRate: Int, targetSurface: Surface) {
-//        Log.d(TAG, "Opening camera: $cameraId, resolution: ${width}x${height}, fps: $frameRate, mode=$mode, quality=$quality")
+    fun openCamera(config: CameraConfig, targetSurface: Surface) {
+        Log.d(TAG, "Opening camera: ${config.cameraId}, resolution: ${config.width}x${config.height}, fps: ${config.frameRate}")
+
+        cameraConfig = config
 
         // 若已有残留的 camera 资源（异常路径），先关闭
         if (cameraDevice != null) {
@@ -158,12 +227,12 @@ class CameraStreamManager(private val context: Context) {
         }
 
         try {
-            cameraManager?.openCamera(cameraId, object : CameraDevice.StateCallback() {
+            cameraManager?.openCamera(config.cameraId, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
 //                    Log.d(TAG, "Camera opened successfully")
                     cameraDevice = camera
-                    // 立即创建 CaptureSession，让摄像头帧流向编码器 Surface
-                    createCameraSessionAndPreview(camera, targetSurface)
+                    // 立即创建 CaptureSession（根据是否高速模式选择不同会话类型）
+                    createCameraSession(camera, config, targetSurface)
                     isCameraReady = true
                     onCameraReady?.invoke(true)
                 }
@@ -197,27 +266,33 @@ class CameraStreamManager(private val context: Context) {
     }
 
     /**
-     * 创建 Camera2 CaptureSession 并启动持续预览（输出到编码器 Surface）
+     * 创建 Camera2 CaptureSession —— 高速模式用 ConstrainedHighSpeed，否则用普通会话
      */
-    private fun createCameraSessionAndPreview(camera: CameraDevice, targetSurface: Surface) {
-        try {
-            camera.createCaptureSession(
-                listOf(targetSurface),
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        Log.d(TAG, "Camera capture session configured")
-                        captureSession = session
-                        startCameraPreview(targetSurface)
-                    }
+    private fun createCameraSession(camera: CameraDevice, config: CameraConfig, targetSurface: Surface) {
+        val callback = object : CameraCaptureSession.StateCallback() {
+            override fun onConfigured(session: CameraCaptureSession) {
+                Log.d(TAG, "Camera capture session configured")
+                captureSession = session
+                startCameraPreview(targetSurface)
+            }
 
-                    override fun onConfigureFailed(session: CameraCaptureSession) {
-                        Log.e(TAG, "Failed to configure camera capture session")
-                        onError?.invoke("配置摄像头会话失败")
-                        releaseCameraResources()
-                    }
-                },
-                cameraHandler
-            )
+            override fun onConfigureFailed(session: CameraCaptureSession) {
+                Log.e(TAG, "Failed to configure camera capture session")
+                onError?.invoke("配置摄像头会话失败")
+                releaseCameraResources()
+            }
+        }
+
+        try {
+            if (config.isHighSpeed) {
+                camera.createConstrainedHighSpeedCaptureSession(
+                    listOf(targetSurface), callback, cameraHandler
+                )
+            } else {
+                camera.createCaptureSession(
+                    listOf(targetSurface), callback, cameraHandler
+                )
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create camera capture session", e)
             onError?.invoke("创建摄像头会话失败: ${e.message}")
@@ -225,33 +300,45 @@ class CameraStreamManager(private val context: Context) {
     }
 
     /**
-     * 开始 Camera 预览（持续输出到 Surface）
+     * 开始 Camera 预览（持续输出帧到 Surface）
+     * - 普通模式：setRepeatingRequest
+     * - 高速模式：createHighSpeedRequestList + setRepeatingBurst
      */
     private fun startCameraPreview(targetSurface: Surface) {
+        val config = cameraConfig ?: return
         try {
-            Log.d(TAG, "Starting camera preview to surface")
+            Log.d(TAG, "Starting camera preview, target fps=${config.frameRate}, highSpeed=${config.isHighSpeed}")
 
             val captureRequestBuilder = cameraDevice?.createCaptureRequest(
                 CameraDevice.TEMPLATE_RECORD
-            )
+            ) ?: return
 
-            captureRequestBuilder?.addTarget(targetSurface)
+            captureRequestBuilder.addTarget(targetSurface)
 
-            // 设置自动对焦和自动曝光
-            captureRequestBuilder?.set(
+            // 自动对焦（视频连续对焦）
+            captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AF_MODE,
                 CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
             )
-            captureRequestBuilder?.set(
+
+            // 固定帧率：设为 [frameRate, frameRate]
+            captureRequestBuilder.set(
+                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                Range(config.frameRate, config.frameRate)
+            )
+
+            // 自动曝光
+            captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_MODE,
                 CaptureRequest.CONTROL_AE_MODE_ON
             )
 
-            val captureRequest = captureRequestBuilder?.build()
+            val request = captureRequestBuilder.build()
 
-            // 设置重复请求，持续输出帧
-            captureSession?.setRepeatingRequest(captureRequest!!, null, cameraHandler)
-            
+            // 高速模式会通过 ConstrainedHighSpeedCaptureSession 自动处理，
+            // 不需要特殊请求列表，直接 setRepeatingRequest 即可
+            captureSession?.setRepeatingRequest(request, null, cameraHandler)
+
             Log.d(TAG, "Camera preview started successfully")
 
         } catch (e: Exception) {
@@ -269,19 +356,19 @@ class CameraStreamManager(private val context: Context) {
      */
     // TODO: 协议切换
     @SuppressLint("MissingPermission")
-    suspend fun startStreaming(rtmpUrl: String, cameraId: String, width: Int, height: Int, selectedFrameRate: Int, activity: Activity) {
+    suspend fun startStreaming(rtmpUrl: String, cameraConfig: CameraConfig, activity: Activity) {
         Log.d(TAG, "Starting RTMP streaming to: $rtmpUrl")
 
         fun onSurfaceReady(surface: Surface) {
-            openCamera(cameraId, width, height, selectedFrameRate, surface)
+            openCamera(cameraConfig, surface)
         }
         streamManager = StreamManager(activity, {
             onSurfaceReady(it)
         }, StreamingConfig(
-            width = width,
-            height = height,
+            width = cameraConfig.width,
+            height = cameraConfig.height,
             videoBitrate = StreamConfig.getVideoBitrate()!!,
-            frameRate = selectedFrameRate,
+            frameRate = cameraConfig.frameRate,
             iFrameInterval = 5,
             videoMode = StreamConfig.getRateMode()!!,
             videoQuality = StreamConfig.getCqQuality()!!,
@@ -414,20 +501,46 @@ class CameraStreamManager(private val context: Context) {
 
     /**
      * 摄像头信息数据类
+     *
+     * fpsToSizes 是一个从帧率到分辨率列表的映射，例如：
+     *   { 60 → [3840x2160], 30 → [全部尺寸], ... }
      */
     data class CameraInfo(
         val cameraId: String,
         val isFront: Boolean,
-        val supportedSizes: List<Size>,
-        val supportedFrameRates: List<Int>
+        val fpsToSizes: Map<Int, List<Size>>
     ) {
+        /** 所有可选的帧率（从高到低） */
+        val allFrameRates: List<Int>
+            get() = fpsToSizes.keys.sortedDescending()
+
+        /** 所有分辨率（去重并按面积降序） */
+        val allSizes: List<Size>
+            get() = fpsToSizes.values.flatten().distinct()
+                .sortedByDescending { it.width * it.height }
+
+        /** 获取某个帧率下支持的分辨率列表 */
+        fun getSizesForFps(fps: Int): List<Size> = fpsToSizes[fps] ?: emptyList()
+
+        /** 最大帧率（用于默认选中） */
+        val maxFrameRate: Int get() = allFrameRates.firstOrNull() ?: 30
+
         fun displayName(context: Context): String {
-            val nameResId = if (isFront) {
-                R.string.camera_front_camera
-            } else {
-                R.string.camera_back_camera
-            }
+            val nameResId = if (isFront) R.string.camera_front_camera else R.string.camera_back_camera
             return context.getString(nameResId)
         }
+    }
+
+    /**
+     * 摄像头启动配置
+     */
+    data class CameraConfig(
+        val cameraId: String,
+        val width: Int,
+        val height: Int,
+        val frameRate: Int
+    ) {
+        /** 是否高速模式（≥120fps 需要用 ConstrainedHighSpeedCaptureSession） */
+        val isHighSpeed: Boolean get() = frameRate >= 120
     }
 }

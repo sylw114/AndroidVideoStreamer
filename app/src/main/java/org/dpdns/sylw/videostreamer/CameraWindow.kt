@@ -153,10 +153,12 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         val (width, height) = selectedResolution.split("x").map { it.toInt() }
                         cameraManager?.startStreaming(
                             rtmpUrl,
-                            selectedCameraId!!,
-                            width,
-                            height,
-                            selectedFrameRate,
+                            CameraStreamManager.CameraConfig(
+                                cameraId = selectedCameraId!!,
+                                width = width,
+                                height = height,
+                                frameRate = selectedFrameRate
+                            ),
                             activity!!
                         )
                     } else {
@@ -208,19 +210,35 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         videoQuality = StreamConfig.getCqQuality()!!
     }
     
-    // 🔥 当摄像头切换时，更新默认分辨率和帧率
+    // 当摄像头切换时，更新默认帧率和分辨率
     LaunchedEffect(selectedCameraId) {
         val currentCamera = availableCameras.find { it.cameraId == selectedCameraId }
         if (currentCamera != null) {
-            // 设置默认分辨率为第一个（通常是最大的）
-            if (currentCamera.supportedSizes.isNotEmpty()) {
-                val defaultSize = currentCamera.supportedSizes.first()
+            // 默认选最大帧率
+            selectedFrameRate = currentCamera.maxFrameRate
+            
+            // 选该帧率下的第一个分辨率
+            val sizesForFps = currentCamera.getSizesForFps(selectedFrameRate)
+            if (sizesForFps.isNotEmpty()) {
+                val defaultSize = sizesForFps.first()
                 selectedResolution = "${defaultSize.width}x${defaultSize.height}"
             }
-            
-            // 设置默认帧率为第一个（通常是最高的）
-            if (currentCamera.supportedFrameRates.isNotEmpty()) {
-                selectedFrameRate = currentCamera.supportedFrameRates.first()
+        }
+    }
+    
+    // 当帧率切换时，自动选择合适的默认分辨率
+    LaunchedEffect(selectedFrameRate, selectedCameraId) {
+        val currentCamera = availableCameras.find { it.cameraId == selectedCameraId }
+        if (currentCamera != null) {
+            val sizesForFps = currentCamera.getSizesForFps(selectedFrameRate)
+            if (sizesForFps.isNotEmpty()) {
+                // 如果当前分辨率不在新帧率支持列表中，切换到第一个
+                val currentSizeStr = selectedResolution
+                val stillSupported = sizesForFps.any { "${it.width}x${it.height}" == currentSizeStr }
+                if (!stillSupported) {
+                    val defaultSize = sizesForFps.first()
+                    selectedResolution = "${defaultSize.width}x${defaultSize.height}"
+                }
             }
         }
     }
@@ -328,9 +346,44 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         }
                     }
                                     
-                    // 分辨率选择
+                    // 🔥 帧率选择（放在第二顺位，先选帧率再选分辨率）
                     val currentCamera = availableCameras.find { it.cameraId == selectedCameraId }
-                    val supportedSizes = currentCamera?.supportedSizes ?: emptyList()
+                    val allFrameRates = currentCamera?.allFrameRates ?: listOf(30)
+                                        
+                    if (allFrameRates.isNotEmpty()) {
+                        ExposedDropdownMenuBox(
+                            expanded = frameRateMenuExpanded,
+                            onExpandedChange = { frameRateMenuExpanded = !frameRateMenuExpanded }
+                        ) {
+                            OutlinedTextField(
+                                value = stringResource(R.string.fps_value, selectedFrameRate),
+                                onValueChange = {},
+                                readOnly = true,
+                                label = { Text(stringResource(R.string.camera_frame_rate)) },
+                                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = frameRateMenuExpanded) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .menuAnchor()
+                            )
+                            ExposedDropdownMenu(
+                                expanded = frameRateMenuExpanded,
+                                onDismissRequest = { frameRateMenuExpanded = false }
+                            ) {
+                                allFrameRates.forEach { fps ->
+                                    DropdownMenuItem(
+                                        text = { Text(stringResource(R.string.fps_value, fps)) },
+                                        onClick = {
+                                            selectedFrameRate = fps
+                                            frameRateMenuExpanded = false
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                                    
+                    // 🔥 分辨率选择（放在第三顺位，根据选中的帧率过滤显示）
+                    val supportedSizes = currentCamera?.getSizesForFps(selectedFrameRate) ?: emptyList()
                                         
                     if (supportedSizes.isNotEmpty()) {
                         ExposedDropdownMenuBox(
@@ -351,7 +404,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                                 expanded = resolutionMenuExpanded,
                                 onDismissRequest = { resolutionMenuExpanded = false }
                             ) {
-                                // 🔥 显示所有支持的分辨率（按从大到小排序）
+                                // 🔥 只显示当前帧率支持的分辨率
                                 supportedSizes.forEach { size ->
                                     val sizeStr = "${size.width}x${size.height}"
                                     DropdownMenuItem(
@@ -362,39 +415,6 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                                         }
                                     )
                                 }
-                            }
-                        }
-                    }
-                                    
-                    // 帧率选择
-                    val supportedFrameRates = currentCamera?.supportedFrameRates ?: listOf(30)
-                                    
-                    ExposedDropdownMenuBox(
-                        expanded = frameRateMenuExpanded,
-                        onExpandedChange = { frameRateMenuExpanded = !frameRateMenuExpanded }
-                    ) {
-                        OutlinedTextField(
-                            value = stringResource(R.string.fps_value, selectedFrameRate),
-                            onValueChange = {},
-                            readOnly = true,
-                            label = { Text(stringResource(R.string.camera_frame_rate)) },
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = frameRateMenuExpanded) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .menuAnchor()
-                        )
-                        ExposedDropdownMenu(
-                            expanded = frameRateMenuExpanded,
-                            onDismissRequest = { frameRateMenuExpanded = false }
-                        ) {
-                            supportedFrameRates.forEach { fps ->
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.fps_value, fps)) },
-                                    onClick = {
-                                        selectedFrameRate = fps
-                                        frameRateMenuExpanded = false
-                                    }
-                                )
                             }
                         }
                     }

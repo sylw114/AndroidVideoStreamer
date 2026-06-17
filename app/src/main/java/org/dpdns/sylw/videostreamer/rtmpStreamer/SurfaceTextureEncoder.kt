@@ -37,6 +37,31 @@ class SurfaceTextureEncoder(
         private const val TAG = "SurfaceTextureEncoder"
         private const val VIDEO_MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
         private const val AUDIO_MIME_TYPE = MediaFormat.MIMETYPE_AUDIO_AAC
+
+        /**
+         * 根据分辨率×帧率计算 H.264 的最小 AVC Level
+         *
+         * H.264 Level 定义了宏块/秒上限（MB/s）：
+         *   Level 4.0 = 245,760  → 1080p@30
+         *   Level 4.2 = 522,240  → 1080p@60
+         *   Level 5.0 = 589,824  → ~1080p@72
+         *   Level 5.1 = 983,040  → 1080p@120
+         *   Level 5.2 = 2,073,600 → 4K@60
+         */
+        fun computeMinAvcLevel(width: Int, height: Int, fps: Int): Int {
+            // 宏块数/帧 = ceil(w/16) * ceil(h/16)
+            val mbPerFrame = ((width + 15) / 16) * ((height + 15) / 16)
+            val mbPerSec = mbPerFrame.toLong() * fps
+
+            return when {
+                mbPerSec <= 245_760  -> MediaCodecInfo.CodecProfileLevel.AVCLevel4
+                mbPerSec <= 522_240  -> MediaCodecInfo.CodecProfileLevel.AVCLevel42
+                mbPerSec <= 589_824  -> MediaCodecInfo.CodecProfileLevel.AVCLevel5
+                mbPerSec <= 983_040  -> MediaCodecInfo.CodecProfileLevel.AVCLevel51
+                mbPerSec <= 2_073_600 -> MediaCodecInfo.CodecProfileLevel.AVCLevel52
+                else -> MediaCodecInfo.CodecProfileLevel.AVCLevel52 // 最高
+            }
+        }
     }
 
     // 视频编码相关
@@ -321,7 +346,9 @@ class SurfaceTextureEncoder(
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
-                setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel4)
+                // 根据帧率+分辨率自动选择最小需要的 AVC Level，移掉硬编码的 Level 4 限制
+                // 1080p@120 → Level 5.1 | 4K@60 → Level 5.2 | 1080p@60 → Level 4.2
+                setInteger(MediaFormat.KEY_LEVEL, computeMinAvcLevel(width, height, frameRate))
                 setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                 if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
