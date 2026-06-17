@@ -280,12 +280,10 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 streamManager?.updateResolution(newWidth, newHeight)
             }
 
-            // 🔥 注册 MediaProjection 停止回调（系统终止权限时自动停止推流）
             binder.onMediaProjectionStopped = {
 //                android.util.Log.w("VideoWindow", "⚠️ MediaProjection stopped by system!")
-                // 通过 StreamManager 停止推流（业务逻辑层）
                 streamManager?.stopStreaming()
-                // isStreaming 会通过 StateFlow 自动更新 UI
+                udpAudioManager?.stop()
             }
 //            android.util.Log.d("VideoWindow", "Screen rotation callback registered in Service")
 
