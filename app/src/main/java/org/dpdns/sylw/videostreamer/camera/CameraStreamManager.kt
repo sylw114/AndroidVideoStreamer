@@ -4,8 +4,6 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.hardware.camera2.*
-import android.os.Handler
-import android.os.HandlerThread
 import android.util.Log
 import android.util.Range
 import android.util.Size
@@ -14,6 +12,9 @@ import androidx.annotation.RequiresPermission
 import android.app.Activity
 import android.media.MediaRecorder
 import android.graphics.ImageFormat
+import android.hardware.camera2.params.OutputConfiguration
+import android.hardware.camera2.params.SessionConfiguration
+import androidx.core.content.ContextCompat
 import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.StreamConfig
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
@@ -37,8 +38,6 @@ class CameraStreamManager(private val context: Context) {
     private var cameraManager: CameraManager? = null
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
-    private var cameraHandlerThread: HandlerThread? = null
-    private var cameraHandler: Handler? = null
 
     // 🔥 推流协议（仅通过接口访问，复用录屏页同一套编码器/RTMP 逻辑）
     private var streamManager: StreamManager? = null
@@ -64,12 +63,6 @@ class CameraStreamManager(private val context: Context) {
      */
     fun init() {
         cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
-
-        // 创建后台线程处理 Camera 回调
-        cameraHandlerThread = HandlerThread("CameraHandler").apply {
-            start()
-        }
-        cameraHandler = Handler(cameraHandlerThread!!.looper)
     }
 
     /**
@@ -100,7 +93,7 @@ class CameraStreamManager(private val context: Context) {
                 if (lensFacing == CameraCharacteristics.LENS_FACING_BACK ||
                     lensFacing == CameraCharacteristics.LENS_FACING_FRONT) {
 
-                    val info = buildCameraInfo(cameraId, characteristics!!)
+                    val info = buildCameraInfo(cameraId, characteristics)
                     cameras.add(info)
                 }
             }
@@ -142,14 +135,14 @@ class CameraStreamManager(private val context: Context) {
             val minDur = configMap?.getOutputMinFrameDuration(ImageFormat.YUV_420_888, size)
             if (minDur != null && minDur > 0) {
                 val maxFps = (1_000_000_000L / minDur).toInt()
-                if (maxFps > 30 && maxFps <= 240) {
+                if (maxFps in 31..240) {
                     fpsSet.add(maxFps)
                 }
             }
         }
 
         // 2c. 从高速度视频收集
-        val highSpeedRanges = configMap?.getHighSpeedVideoFpsRanges()
+        val highSpeedRanges = configMap?.highSpeedVideoFpsRanges
         if (highSpeedRanges != null) {
             for (range in highSpeedRanges) {
                 if (range.upper >= 120) fpsSet.add(range.upper)
@@ -157,7 +150,7 @@ class CameraStreamManager(private val context: Context) {
         }
 
         // 收集所有高速度视频尺寸（Set 加速查找）
-        val highSpeedSizes = configMap?.getHighSpeedVideoSizes()?.toSet() ?: emptySet()
+        val highSpeedSizes = configMap?.highSpeedVideoSizes?.toSet() ?: emptySet()
 
         // 3. 构建 fps → sizes 映射
         val fpsToSizes = mutableMapOf<Int, List<Size>>()
@@ -167,7 +160,7 @@ class CameraStreamManager(private val context: Context) {
                 // 高速帧率（≥120fps）：仅高速度视频尺寸
                 fps >= 120 -> {
                     val candidates = mutableListOf<Size>()
-                    val hsRanges = configMap?.getHighSpeedVideoFpsRanges()
+                    val hsRanges = configMap?.highSpeedVideoFpsRanges
                     for (hsSize in highSpeedSizes) {
                         // 检查该尺寸是否支持目标帧率
                         var supported = false
@@ -227,7 +220,7 @@ class CameraStreamManager(private val context: Context) {
         }
 
         try {
-            cameraManager?.openCamera(config.cameraId, object : CameraDevice.StateCallback() {
+            cameraManager?.openCamera(config.cameraId, ContextCompat.getMainExecutor(context), object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
 //                    Log.d(TAG, "Camera opened successfully")
                     cameraDevice = camera
@@ -257,8 +250,7 @@ class CameraStreamManager(private val context: Context) {
                     releaseCameraResources()
                     onError?.invoke(errorMsg)
                 }
-            }, cameraHandler)
-
+            })
         } catch (e: Exception) {
             Log.e(TAG, "Failed to open camera", e)
             onError?.invoke("打开摄像头失败: ${e.message}")
@@ -284,15 +276,13 @@ class CameraStreamManager(private val context: Context) {
         }
 
         try {
-            if (config.isHighSpeed) {
-                camera.createConstrainedHighSpeedCaptureSession(
-                    listOf(targetSurface), callback, cameraHandler
-                )
-            } else {
-                camera.createCaptureSession(
-                    listOf(targetSurface), callback, cameraHandler
-                )
-            }
+            val sessionConfig = SessionConfiguration(
+                if(!config.isHighSpeed)SessionConfiguration.SESSION_REGULAR else SessionConfiguration.SESSION_HIGH_SPEED,
+                listOf(OutputConfiguration(targetSurface)),
+                ContextCompat.getMainExecutor(context),
+                callback
+            )
+            camera.createCaptureSession(sessionConfig)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create camera capture session", e)
             onError?.invoke("创建摄像头会话失败: ${e.message}")
@@ -306,38 +296,40 @@ class CameraStreamManager(private val context: Context) {
      */
     private fun startCameraPreview(targetSurface: Surface) {
         val config = cameraConfig ?: return
+        val session = captureSession ?: return
+        val device = cameraDevice ?: return
+
         try {
             Log.d(TAG, "Starting camera preview, target fps=${config.frameRate}, highSpeed=${config.isHighSpeed}")
 
-            val captureRequestBuilder = cameraDevice?.createCaptureRequest(
-                CameraDevice.TEMPLATE_RECORD
-            ) ?: return
+            val captureRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
 
             captureRequestBuilder.addTarget(targetSurface)
 
-            // 自动对焦（视频连续对焦）
             captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AF_MODE,
                 CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
             )
-
-            // 固定帧率：设为 [frameRate, frameRate]
-            captureRequestBuilder.set(
-                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                Range(config.frameRate, config.frameRate)
-            )
-
-            // 自动曝光
             captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_MODE,
                 CaptureRequest.CONTROL_AE_MODE_ON
             )
 
+            captureRequestBuilder.set(
+                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                Range(config.frameRate, config.frameRate)
+            )
+
             val request = captureRequestBuilder.build()
 
-            // 高速模式会通过 ConstrainedHighSpeedCaptureSession 自动处理，
-            // 不需要特殊请求列表，直接 setRepeatingRequest 即可
-            captureSession?.setRepeatingRequest(request, null, cameraHandler)
+            if (config.isHighSpeed && session is CameraConstrainedHighSpeedCaptureSession) {
+                Log.d(TAG, "Using High Speed configuration...")
+                val highSpeedRequestList = session.createHighSpeedRequestList(request)
+                session.setRepeatingBurst(highSpeedRequestList, null, null)
+            } else {
+                Log.d(TAG, "Using Normal Speed configuration...")
+                session.setRepeatingRequest(request, null, null)
+            }
 
             Log.d(TAG, "Camera preview started successfully")
 
@@ -479,16 +471,6 @@ class CameraStreamManager(private val context: Context) {
 
         stopStreaming()
         streamManager = null
-
-        // 停止后台线程
-        cameraHandlerThread?.quitSafely()
-        try {
-            cameraHandlerThread?.join()
-        } catch (e: InterruptedException) {
-            Log.e(TAG, "Error joining handler thread", e)
-        }
-        cameraHandlerThread = null
-        cameraHandler = null
 
         cameraManager = null
 
