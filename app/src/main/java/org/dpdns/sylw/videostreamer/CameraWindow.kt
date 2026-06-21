@@ -151,13 +151,16 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                     activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     if (selectedCameraId != null) {
                         val (width, height) = selectedResolution.split("x").map { it.toInt() }
+                        val currentCameraInfo = availableCameras.find { it.cameraId == selectedCameraId }
                         cameraManager?.startStreaming(
                             rtmpUrl,
                             CameraStreamManager.CameraConfig(
                                 cameraId = selectedCameraId!!,
                                 width = width,
                                 height = height,
-                                frameRate = selectedFrameRate
+                                frameRate = selectedFrameRate,
+                                fpsToSizes = currentCameraInfo?.fpsToSizes ?: emptyMap(),
+                                fpsToMin = currentCameraInfo?.fpsToMin ?: emptyMap()
                             ),
                             activity!!
                         )

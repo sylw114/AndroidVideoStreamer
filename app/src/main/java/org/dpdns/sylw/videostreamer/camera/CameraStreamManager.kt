@@ -120,7 +120,7 @@ class CameraStreamManager(private val context: Context) {
             ?: emptyList()
 
         if (allSizes.isEmpty()) {
-            return CameraInfo(cameraId = cameraId, isFront = isFront, fpsToSizes = emptyMap())
+            return CameraInfo(cameraId = cameraId, isFront = isFront, fpsToSizes = emptyMap(), fpsToMin = emptyMap())
         }
 
         // 2. 收集所有可用的帧率值
@@ -152,8 +152,9 @@ class CameraStreamManager(private val context: Context) {
         // 收集所有高速度视频尺寸（Set 加速查找）
         val highSpeedSizes = configMap?.highSpeedVideoSizes?.toSet() ?: emptySet()
 
-        // 3. 构建 fps → sizes 映射
+        // 3. 构建 fps → sizes 映射，并记录每个帧率对应的最小可用帧率（来自 AE ranges / high speed ranges）
         val fpsToSizes = mutableMapOf<Int, List<Size>>()
+        val fpsToMin = mutableMapOf<Int, Int>()
 
         for (fps in fpsSet.filter { it > 0 }.sortedDescending()) {
             val sizes = when {
@@ -194,13 +195,34 @@ class CameraStreamManager(private val context: Context) {
             }
             if (sizes.isNotEmpty()) {
                 fpsToSizes[fps] = sizes
+
+                // 计算该 fps 的最小帧率
+                // 优先使用 AE 范围中包含该 fps 的最小下界；其次使用 highSpeedRanges 的下界；否则将最小值设为 fps 自身
+                var minForFps: Int? = null
+                if (aeRanges != null) {
+                    for (r in aeRanges) {
+                        if (r.lower <= fps && r.upper >= fps) {
+                            if (minForFps == null || r.lower < minForFps) minForFps = r.lower
+                        }
+                    }
+                }
+                if (minForFps == null && highSpeedRanges != null) {
+                    for (r in highSpeedRanges) {
+                        if (r.lower <= fps && r.upper >= fps) {
+                            if (minForFps == null || r.lower < minForFps) minForFps = r.lower
+                        }
+                    }
+                }
+                if (minForFps == null) minForFps = fps
+                fpsToMin[fps] = minForFps
             }
         }
 
         return CameraInfo(
             cameraId = cameraId,
             isFront = isFront,
-            fpsToSizes = fpsToSizes
+            fpsToSizes = fpsToSizes,
+            fpsToMin = fpsToMin
         )
     }
 
@@ -315,9 +337,10 @@ class CameraStreamManager(private val context: Context) {
                 CaptureRequest.CONTROL_AE_MODE_ON
             )
 
+            // 使用存储的最小帧率作为 AE 范围下界，确保设备可以在该范围内调节（例如 15-30fps）
             captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                Range(config.frameRate, config.frameRate)
+                Range(config.minFrameRateForSelected, config.frameRate)
             )
 
             val request = captureRequestBuilder.build()
@@ -346,7 +369,6 @@ class CameraStreamManager(private val context: Context) {
      * 2. 协议层通过 onSurfaceReady 回调把 Surface 交还本管理器
      * 3. 本管理器使用该 Surface 打开摄像头，启动 CaptureSession
      */
-    // TODO: 协议切换
     @SuppressLint("MissingPermission")
     suspend fun startStreaming(rtmpUrl: String, cameraConfig: CameraConfig, activity: Activity) {
         Log.d(TAG, "Starting RTMP streaming to: $rtmpUrl")
@@ -380,7 +402,6 @@ class CameraStreamManager(private val context: Context) {
                 try {
                     isHandlingError = true
                     Log.e(TAG, "Protocol error: $error")
-                    // 🔥 推流出错时一并关闭摄像头，避免摄像头仍在占用而推流已断
                     releaseCameraResources()
                     this@CameraStreamManager.onError?.invoke(error)
                 } finally {
@@ -442,11 +463,27 @@ class CameraStreamManager(private val context: Context) {
     private fun releaseCameraResources() {
         Log.d(TAG, "Releasing camera resources...")
 
-        captureSession?.close()
-        captureSession = null
+        // Closing a CameraCaptureSession may internally call stopRepeating() which can
+        // throw CameraAccessException (CAMERA_ERROR) if the device is already in an
+        // error/closed state. Guard these calls to avoid uncaught exceptions coming
+        // from camera framework threads (see logs: "Exception while stopping repeating").
+        try {
+            captureSession?.close()
+        } catch (e: Exception) {
+            // Catch CameraAccessException, IllegalStateException and any runtime
+            // exception coming from the framework and log it. Do not rethrow.
+            Log.w(TAG, "Ignored exception while closing captureSession", e)
+        } finally {
+            captureSession = null
+        }
 
-        cameraDevice?.close()
-        cameraDevice = null
+        try {
+            cameraDevice?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Ignored exception while closing cameraDevice", e)
+        } finally {
+            cameraDevice = null
+        }
 
         if (isCameraReady) {
             isCameraReady = false
@@ -490,7 +527,9 @@ class CameraStreamManager(private val context: Context) {
     data class CameraInfo(
         val cameraId: String,
         val isFront: Boolean,
-        val fpsToSizes: Map<Int, List<Size>>
+        val fpsToSizes: Map<Int, List<Size>>,
+        /** 每个帧率对应的最小帧率（下界） */
+        val fpsToMin: Map<Int, Int>
     ) {
         /** 所有可选的帧率（从高到低） */
         val allFrameRates: List<Int>
@@ -503,6 +542,9 @@ class CameraStreamManager(private val context: Context) {
 
         /** 获取某个帧率下支持的分辨率列表 */
         fun getSizesForFps(fps: Int): List<Size> = fpsToSizes[fps] ?: emptyList()
+
+        /** 获取某个帧率下的最小帧率（用于设置 AE 范围的下界） */
+        fun getMinForFps(fps: Int): Int = fpsToMin[fps] ?: fps
 
         /** 最大帧率（用于默认选中） */
         val maxFrameRate: Int get() = allFrameRates.firstOrNull() ?: 30
@@ -520,9 +562,16 @@ class CameraStreamManager(private val context: Context) {
         val cameraId: String,
         val width: Int,
         val height: Int,
-        val frameRate: Int
+        val frameRate: Int,
+        /** 完整的帧率->分辨率映射（来源于 CameraInfo），用于后续打开摄像头时参考可用最小帧率 */
+        val fpsToSizes: Map<Int, List<Size>> = emptyMap(),
+        /** 每个帧率对应的最小帧率（下界），用于设置 AE 范围 */
+        val fpsToMin: Map<Int, Int> = emptyMap()
     ) {
         /** 是否高速模式（≥120fps 需要用 ConstrainedHighSpeedCaptureSession） */
         val isHighSpeed: Boolean get() = frameRate >= 120
+
+        /** 当前选中帧率对应的最小帧率（用于设置 CONTROL_AE_TARGET_FPS_RANGE 的下界） */
+        val minFrameRateForSelected: Int get() = fpsToMin[frameRate] ?: frameRate
     }
 }
