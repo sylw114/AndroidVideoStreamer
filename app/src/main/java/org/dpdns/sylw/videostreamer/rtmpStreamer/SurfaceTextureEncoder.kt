@@ -8,6 +8,7 @@ import androidx.annotation.RequiresPermission
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.floor
 
 /**
  * SurfaceTexture 编码器
@@ -68,6 +69,8 @@ class SurfaceTextureEncoder(
     private var mediaCodecVideo: MediaCodec? = null
     private var surface: Surface? = null
     private var videoBufferInfo: MediaCodec.BufferInfo? = null
+    private var effectiveVideoFrameRate: Int = frameRate
+    private var selectedVideoEncoderName: String? = null
     
     // 音频编码相关
     private var mediaCodecAudio: MediaCodec? = null
@@ -91,6 +94,7 @@ class SurfaceTextureEncoder(
     // 状态回调
     var onStreamStateChanged: ((Boolean) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    var onInfo: ((String) -> Unit)? = null
     
     // 缓存的 AVCC 配置（从 csd-0/csd-1 合并）
     private var cachedAVCCConfig: ByteArray? = null
@@ -220,10 +224,16 @@ class SurfaceTextureEncoder(
     fun start(rtmpUrl: String) {
         try {
 //            Log.d(TAG, "Starting encoder: ${width}x${height}, bitrate=$videoBitrate, fps=$frameRate")
+            val encoderChoice = selectVideoEncoder(width, height, frameRate)
+            selectedVideoEncoderName = encoderChoice.codecName
+            effectiveVideoFrameRate = encoderChoice.frameRate
+            if (effectiveVideoFrameRate < frameRate) {
+                onInfo?.invoke("当前分辨率不支持 ${frameRate}fps 编码，已自动降级为 ${effectiveVideoFrameRate}fps")
+            }
             
             // 1. 初始化 RTMP 推流器
             rtmpPusher = RtmpPusher()
-            rtmpPusher?.setVideoParams(width, height, videoBitrate, frameRate)
+            rtmpPusher?.setVideoParams(width, height, videoBitrate, effectiveVideoFrameRate)
             rtmpPusher?.setAudioParams(audioSampleRate, audioChannelCount)
             rtmpPusher?.setAudioEnabled(useAudio)
             
@@ -331,6 +341,8 @@ class SurfaceTextureEncoder(
 
             cachedAVCCConfig = null
             cachedAudioSpecificConfig = null
+            selectedVideoEncoderName = null
+            effectiveVideoFrameRate = frameRate
             spsPpsSent = false
             initialVideoPtsUs = -1L
             lastVideoTimestampMs = 0L
@@ -365,23 +377,28 @@ class SurfaceTextureEncoder(
     private fun initVideoEncoder() {
         try {
 //            Log.d(TAG, "Initializing video encoder...")
+            val encoderName = selectedVideoEncoderName
+                ?: selectVideoEncoder(width, height, frameRate).also {
+                    selectedVideoEncoderName = it.codecName
+                    effectiveVideoFrameRate = it.frameRate
+                }.codecName
             
             // 创建 MediaFormat
             val format = MediaFormat.createVideoFormat(VIDEO_MIME_TYPE, width, height).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE, videoBitrate)
-                setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, frameRate.toFloat())
-                setInteger(MediaFormat.KEY_FRAME_RATE, frameRate)
+                setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, effectiveVideoFrameRate.toFloat())
+                setInteger(MediaFormat.KEY_FRAME_RATE, effectiveVideoFrameRate)
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, 
                     MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
                 setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
                 // 根据帧率+分辨率自动选择最小需要的 AVC Level，移掉硬编码的 Level 4 限制
                 // 1080p@120 → Level 5.1 | 4K@60 → Level 5.2 | 1080p@60 → Level 4.2
-                setInteger(MediaFormat.KEY_LEVEL, computeMinAvcLevel(width, height, frameRate))
+                setInteger(MediaFormat.KEY_LEVEL, computeMinAvcLevel(width, height, effectiveVideoFrameRate))
                 setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                 if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-                setInteger(MediaFormat.KEY_OPERATING_RATE, frameRate)
+                setInteger(MediaFormat.KEY_OPERATING_RATE, effectiveVideoFrameRate)
                 
                 if (videoMode == "CBR") {
                     setInteger(MediaFormat.KEY_COMPLEXITY, 0)
@@ -395,7 +412,7 @@ class SurfaceTextureEncoder(
 //            Log.d(TAG, "Creating encoder with format: $format")
             
             // 创建编码器
-            mediaCodecVideo = MediaCodec.createEncoderByType(VIDEO_MIME_TYPE).apply {
+            mediaCodecVideo = MediaCodec.createByCodecName(encoderName).apply {
                 configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 surface = this@apply.createInputSurface()
                 start()
@@ -630,6 +647,46 @@ class SurfaceTextureEncoder(
             encodeThread = null
         }
 //        Log.d(TAG, "Encode thread stopped")
+    }
+
+    private data class VideoEncoderChoice(
+        val codecName: String,
+        val frameRate: Int
+    )
+
+    /**
+     * 高帧率必须先按编码器能力协商，否则部分硬件会在 dequeueOutputBuffer 时直接进入错误态。
+     */
+    private fun selectVideoEncoder(width: Int, height: Int, requestedFps: Int): VideoEncoderChoice {
+        val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        val codecInfos = codecList.codecInfos.sortedWith(compareBy<MediaCodecInfo> {
+            if (it.isSoftwareOnly) 1 else 0
+        }.thenBy { it.name })
+        var fallback: VideoEncoderChoice? = null
+
+        for (codecInfo in codecInfos) {
+            if (!codecInfo.isEncoder) continue
+            if (codecInfo.supportedTypes.none { it.equals(VIDEO_MIME_TYPE, ignoreCase = true) }) continue
+
+            val capabilities = runCatching { codecInfo.getCapabilitiesForType(VIDEO_MIME_TYPE) }.getOrNull()
+                ?: continue
+            val videoCapabilities = capabilities.videoCapabilities ?: continue
+            if (!videoCapabilities.isSizeSupported(width, height)) continue
+
+            val supportedFps = if (videoCapabilities.areSizeAndRateSupported(width, height, requestedFps.toDouble())) {
+                requestedFps
+            } else {
+                runCatching {
+                    floor(videoCapabilities.getSupportedFrameRatesFor(width, height).upper).toInt()
+                }.getOrDefault(30).coerceAtLeast(1)
+            }
+
+            val choice = VideoEncoderChoice(codecInfo.name, supportedFps.coerceAtMost(requestedFps))
+            if (choice.frameRate >= requestedFps) return choice
+            if (fallback == null || choice.frameRate > fallback.frameRate) fallback = choice
+        }
+
+        return fallback ?: throw IllegalStateException("当前设备没有可用于 ${width}x${height} 的 H.264 视频编码器")
     }
     
     /**
@@ -951,7 +1008,7 @@ class SurfaceTextureEncoder(
         audioThread = Thread({
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
             
-            val bytesPerFrame = audioSampleRate * audioChannelCount * 2 / frameRate // 每帧的字节数
+            val bytesPerFrame = audioSampleRate * audioChannelCount * 2 / effectiveVideoFrameRate // 每帧的字节数
             var frameCount = 0L
             var consecutiveFailures = 0
             val maxFailures = 100

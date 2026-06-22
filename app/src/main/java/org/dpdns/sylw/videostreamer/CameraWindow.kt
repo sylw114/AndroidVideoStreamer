@@ -117,6 +117,12 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                     Toast.makeText(context, error, Toast.LENGTH_LONG).show()
                 }
             }
+
+            onInfo = { message ->
+                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 

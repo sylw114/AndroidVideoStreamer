@@ -85,6 +85,11 @@ interface IStreamingProtocol {
     var onError: ((String) -> Unit)?
 
     /**
+     * 设置非致命提示回调
+     */
+    var onInfo: ((String) -> Unit)?
+
+    /**
      * 编码器输入 Surface 就绪回调
      * 当协议层创建好编码器的输入 Surface 后触发，UI 层可用该 Surface
      * 连接 Camera2（摄像头模式）或更新 VirtualDisplay（录屏模式）。

@@ -54,9 +54,13 @@ class CameraStreamManager(private val context: Context) {
     var onCameraReady: ((Boolean) -> Unit)? = null
     var onStreamingStateChanged: ((Boolean) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    var onInfo: ((String) -> Unit)? = null
 
     // 防止递归调用
     private var isHandlingError = false
+
+    // 高速模式降级标记：是否已尝试过回退到普通帧率
+    private var hasAttemptedFallback = false
     
     /**
      * 初始化 Camera 管理器
@@ -229,11 +233,15 @@ class CameraStreamManager(private val context: Context) {
     /**
      * 打开摄像头（仅打开 Camera2 设备，不创建编码器，也不创建 CaptureSession）
      */
+    // 保存最近一次传给 openCamera 的 Surface，用于降级重试
+    private var lastTargetSurface: Surface? = null
+
     @RequiresPermission(Manifest.permission.CAMERA)
     fun openCamera(config: CameraConfig, targetSurface: Surface) {
         Log.d(TAG, "Opening camera: ${config.cameraId}, resolution: ${config.width}x${config.height}, fps: ${config.frameRate}")
 
         cameraConfig = config
+        lastTargetSurface = targetSurface
 
         // 若已有残留的 camera 资源（异常路径），先关闭
         if (cameraDevice != null) {
@@ -267,6 +275,18 @@ class CameraStreamManager(private val context: Context) {
                         else -> "未知错误: $error"
                     }
                     Log.e(TAG, "Camera error: $errorMsg")
+
+                    // 高速模式失败时自动降级到普通帧率
+                    val currentConfig = cameraConfig
+                    if (currentConfig != null && currentConfig.isHighSpeed && !hasAttemptedFallback) {
+                        Log.w(TAG, "高速摄像头会话失败，尝试降级到普通帧率")
+                        // 注意：只释放摄像头资源，不释放 streamManager（编码器仍需保留）
+                        releaseCameraResources()
+                        hasAttemptedFallback = true
+                        tryFallbackToNormalSpeed(currentConfig)
+                        return
+                    }
+
                     // 摄像头出错也要停掉推流，避免编码器无输入却一直占用 RTMP
                     stopStreaming()
                     releaseCameraResources()
@@ -292,6 +312,17 @@ class CameraStreamManager(private val context: Context) {
 
             override fun onConfigureFailed(session: CameraCaptureSession) {
                 Log.e(TAG, "Failed to configure camera capture session")
+
+                // 高速模式配置失败时自动降级
+                val currentConfig = cameraConfig
+                if (currentConfig != null && currentConfig.isHighSpeed && !hasAttemptedFallback) {
+                    Log.w(TAG, "高速会话配置失败，尝试降级到普通帧率")
+                    releaseCameraResources()
+                    hasAttemptedFallback = true
+                    tryFallbackToNormalSpeed(currentConfig)
+                    return
+                }
+
                 onError?.invoke("配置摄像头会话失败")
                 releaseCameraResources()
             }
@@ -358,7 +389,64 @@ class CameraStreamManager(private val context: Context) {
 
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start camera preview", e)
+
+            // 高速模式启动预览失败时也尝试降级
+            val currentConfig = cameraConfig
+            if (currentConfig != null && currentConfig.isHighSpeed && !hasAttemptedFallback) {
+                Log.w(TAG, "高速预览启动失败，尝试降级到普通帧率")
+                releaseCameraResources()
+                hasAttemptedFallback = true
+                tryFallbackToNormalSpeed(currentConfig)
+                return
+            }
+
             onError?.invoke("启动预览失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 高速模式失败后降级到普通帧率（60fps → 30fps）
+     *
+     * 某些设备的高速摄像头会话（SESSION_HIGH_SPEED）因硬件/驱动兼容性问题
+     * 无法正常工作（表现为 C2AllocatorGralloc 不兼容、摄像头设备错误等）。
+     * 此方法将帧率降级到设备支持的普通帧率，使用常规会话重新打开摄像头。
+     */
+    @SuppressLint("MissingPermission")
+    private fun tryFallbackToNormalSpeed(originalConfig: CameraConfig) {
+        // 从 fpsToSizes 中找到最高的非高速帧率（<120fps）
+        val fallbackFps = originalConfig.fpsToSizes.keys
+            .filter { it < 120 }
+            .maxOrNull()
+
+        if (fallbackFps == null || fallbackFps <= 0) {
+            Log.e(TAG, "无法找到可用的普通帧率进行降级")
+            onError?.invoke("高速摄像头模式不兼容，且无可用的普通帧率")
+            return
+        }
+
+        Log.d(TAG, "降级到普通帧率: ${originalConfig.frameRate}fps → ${fallbackFps}fps")
+
+        // 构建降级配置：保持分辨率不变，降低帧率，关闭高速模式
+        val fallbackConfig = CameraConfig(
+            cameraId = originalConfig.cameraId,
+            width = originalConfig.width,
+            height = originalConfig.height,
+            frameRate = fallbackFps,
+            fpsToSizes = originalConfig.fpsToSizes,
+            fpsToMin = originalConfig.fpsToMin
+        )
+
+        try {
+            val surface = lastTargetSurface
+            if (surface == null) {
+                Log.e(TAG, "无法获取编码器 Surface 进行降级")
+                onError?.invoke("高速摄像头模式降级失败：编码器 Surface 不可用")
+                return
+            }
+            openCamera(fallbackConfig, surface)
+        } catch (e: Exception) {
+            Log.e(TAG, "降级到普通帧率失败", e)
+            onError?.invoke("降级到普通帧率失败: ${e.message}")
         }
     }
 
@@ -372,6 +460,9 @@ class CameraStreamManager(private val context: Context) {
     @SuppressLint("MissingPermission")
     suspend fun startStreaming(rtmpUrl: String, cameraConfig: CameraConfig, activity: Activity) {
         Log.d(TAG, "Starting RTMP streaming to: $rtmpUrl")
+
+        // 重置降级标记，每次新推流都允许先尝试高速模式
+        hasAttemptedFallback = false
 
         fun onSurfaceReady(surface: Surface) {
             openCamera(cameraConfig, surface)
@@ -407,6 +498,10 @@ class CameraStreamManager(private val context: Context) {
                 } finally {
                     isHandlingError = false
                 }
+            }
+
+            onInfo = { message ->
+                this@CameraStreamManager.onInfo?.invoke(message)
             }
         }
         if (streamManager == null) {
@@ -508,12 +603,15 @@ class CameraStreamManager(private val context: Context) {
 
         stopStreaming()
         streamManager = null
+        lastTargetSurface = null
+        hasAttemptedFallback = false
 
         cameraManager = null
 
         onCameraReady = null
         onStreamingStateChanged = null
         onError = null
+        onInfo = null
 
         Log.d(TAG, "CameraStreamManager released")
     }

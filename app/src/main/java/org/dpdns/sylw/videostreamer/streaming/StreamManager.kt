@@ -34,6 +34,7 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
     // 状态回调
     var onStreamingStateChanged: ((Boolean) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
+    var onInfo: ((String) -> Unit)? = null
     
     /**
      * 初始化推流管理器（默认使用 RTMP 协议）
@@ -61,6 +62,10 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
             onError = { error ->
 //                Log.e(TAG, "Protocol error: $error")
                 this@StreamManager.onError?.invoke(error)
+            }
+
+            onInfo = { message ->
+                this@StreamManager.onInfo?.invoke(message)
             }
         }
 
