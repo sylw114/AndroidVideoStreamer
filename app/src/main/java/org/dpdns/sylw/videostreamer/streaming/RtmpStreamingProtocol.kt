@@ -67,6 +67,7 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
                     try {
                         isHandlingError = true
 //                        Log.e(TAG, "Encoder error: $error")
+                        cleanupAfterEncoderExit()
                         this@RtmpStreamingProtocol.onError?.invoke(error)
                     } finally {
                         isHandlingError = false
@@ -75,6 +76,9 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
 
                 // 启动编码器（会创建 input surface 并开始推流）
                 start(url)
+                if (!isRunning()) {
+                    throw IllegalStateException("编码器未能进入运行状态")
+                }
 
                 // 音频捕获启动回调
                 if (config.useAudio) {
@@ -126,6 +130,29 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
 
         } catch (e: Exception) {
 //            Log.e(TAG, "Error stopping RTMP streaming", e)
+        }
+    }
+
+    override fun cleanupAfterEncoderExit() {
+        try {
+            currentConfig?.let { config ->
+                if (config.useAudio) {
+                    config.onAudioCaptureStop?.invoke()
+                }
+            }
+        } catch (e: Exception) {
+//            Log.w(TAG, "Error stopping audio capture after encoder exit", e)
+        }
+
+        try {
+            encoder?.stop()
+        } catch (e: Exception) {
+//            Log.w(TAG, "Error stopping encoder after failure", e)
+        } finally {
+            encoder = null
+            currentUrl = null
+            currentConfig = null
+            onStreamingStateChanged?.invoke(false)
         }
     }
 

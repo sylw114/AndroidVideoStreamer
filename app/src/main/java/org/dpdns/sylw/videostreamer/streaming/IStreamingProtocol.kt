@@ -67,6 +67,14 @@ interface IStreamingProtocol {
     fun release()
 
     /**
+     * 编码器异常退出后的资源清理
+     *
+     * 协议实现需要释放编码器、网络连接和协议持有的运行状态，
+     * 并确保上层收到停止推流状态。
+     */
+    fun cleanupAfterEncoderExit()
+
+    /**
      * 设置状态回调
      */
     var onStreamingStateChanged: ((Boolean) -> Unit)?

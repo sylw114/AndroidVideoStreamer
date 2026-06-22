@@ -82,6 +82,8 @@ class SurfaceTextureEncoder(
     // 编码线程
     private var encodeThread: Thread? = null
     private var isEncoding = false
+    private val cleanupLock = Any()
+    private var isCleaningUp = false
     
     // RTMP 推流器
     private var rtmpPusher: RtmpPusher? = null
@@ -280,9 +282,8 @@ class SurfaceTextureEncoder(
                 initAudioEncoder()  // 🔥 总是初始化音频编码器
             }
 
-            startEncodeThread()
-            
             isEncoding = true
+            startEncodeThread()
             onStreamStateChanged?.invoke(true)
             
 //            Log.d(TAG, "Encoder started successfully")
@@ -290,7 +291,7 @@ class SurfaceTextureEncoder(
         } catch (e: Exception) {
 //            Log.e(TAG, "Failed to start encoder", e)
             onError?.invoke("启动编码器失败：${e.message}")
-            stop()
+            cleanupEncoderResources(notifyState = true)
         }
     }
     
@@ -298,26 +299,54 @@ class SurfaceTextureEncoder(
      * 停止编码和推流
      */
     fun stop() {
-//        Log.d(TAG, "Stopping encoder...")
-        isEncoding = false
-        
-        // 停止编码线程
-        stopEncodeThread()
-        
-        // 停止音频录制
-        stopAudioRecorder()
-        
-        // 释放视频编码器
-        releaseVideoEncoder()
-        
-        // 断开 RTMP 连接
-        rtmpPusher?.disconnect()
-        rtmpPusher = null
-        
-        isEncoding = false
-        onStreamStateChanged?.invoke(false)
-        
-//        Log.d(TAG, "Encoder stopped")
+        cleanupEncoderResources(notifyState = true)
+    }
+
+    private fun handleEncoderFailure(message: String) {
+        onError?.invoke(message)
+        cleanupEncoderResources(notifyState = true)
+    }
+
+    private fun cleanupEncoderResources(notifyState: Boolean) {
+        synchronized(cleanupLock) {
+            if (isCleaningUp) return
+            isCleaningUp = true
+        }
+
+        try {
+//            Log.d(TAG, "Stopping encoder...")
+            isEncoding = false
+
+            stopEncodeThread()
+            stopAudioRecorder()
+            releaseVideoEncoder()
+
+            try {
+                rtmpPusher?.disconnect()
+            } catch (e: Exception) {
+//                Log.w(TAG, "Error disconnecting RTMP pusher", e)
+            } finally {
+                rtmpPusher = null
+            }
+
+            cachedAVCCConfig = null
+            cachedAudioSpecificConfig = null
+            spsPpsSent = false
+            initialVideoPtsUs = -1L
+            lastVideoTimestampMs = 0L
+            streamStartTimeNs = -1L
+            firstAudioPcmTimestampNs = -1L
+
+            if (notifyState) {
+                onStreamStateChanged?.invoke(false)
+            }
+
+//            Log.d(TAG, "Encoder stopped")
+        } finally {
+            synchronized(cleanupLock) {
+                isCleaningUp = false
+            }
+        }
     }
     
     /**
@@ -586,9 +615,20 @@ class SurfaceTextureEncoder(
      * 停止编码线程
      */
     private fun stopEncodeThread() {
-        encodeThread?.interrupt()
-        encodeThread?.join(1000)
-        encodeThread = null
+        val thread = encodeThread
+        if (thread != null && thread != Thread.currentThread()) {
+            try {
+                thread.interrupt()
+                thread.join(1000)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } catch (e: Exception) {
+//                Log.w(TAG, "Error stopping encode thread", e)
+            }
+        }
+        if (thread == null || thread == Thread.currentThread() || !thread.isAlive) {
+            encodeThread = null
+        }
 //        Log.d(TAG, "Encode thread stopped")
     }
     
@@ -683,8 +723,8 @@ class SurfaceTextureEncoder(
 //                                Log.e(TAG, "Error processing video data ($consecutiveErrors/$maxConsecutiveErrors): ${e.message}")
                                 if (consecutiveErrors >= maxConsecutiveErrors) {
 //                                    Log.e(TAG, "Too many consecutive errors, stopping encoding")
-                                    isEncoding = false
-                                    onError?.invoke("视频处理错误过多，停止编码")
+                                    handleEncoderFailure("视频处理错误过多，停止编码")
+                                    break
                                 }
                             }
                         } else {
@@ -705,6 +745,8 @@ class SurfaceTextureEncoder(
             } catch (e: Exception) {
                 if (isEncoding) {
 //                    Log.e(TAG, "Error in video encoding loop", e)
+                    handleEncoderFailure("视频编码器异常退出：${e.message}")
+                    break
                 }
             }
         }
@@ -1019,9 +1061,20 @@ class SurfaceTextureEncoder(
      */
     private fun stopAudioRecorder() {
         isAudioRecording = false
-        audioThread?.interrupt()
-        audioThread?.join(1000)
-        audioThread = null
+        val thread = audioThread
+        if (thread != null && thread != Thread.currentThread()) {
+            try {
+                thread.interrupt()
+                thread.join(1000)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } catch (e: Exception) {
+//                Log.w(TAG, "Error stopping audio thread", e)
+            }
+        }
+        if (thread == null || thread == Thread.currentThread() || !thread.isAlive) {
+            audioThread = null
+        }
         
         try {
             mediaCodecAudio?.stop()
@@ -1071,6 +1124,9 @@ class SurfaceTextureEncoder(
             
         } catch (e: Exception) {
 //            Log.e(TAG, "❌ Error encoding audio: ${e.message}", e)
+            if (isEncoding) {
+                handleEncoderFailure("音频编码器异常退出：${e.message}")
+            }
         }
     }
     
@@ -1241,8 +1297,7 @@ class SurfaceTextureEncoder(
 //                Log.v("AudioEncode", "✅ Audio encoder alive: ${codecInfo?.name}")
             } catch (e: Exception) {
 //                Log.e("AudioEncode", "❌ Audio encoder DEAD! Cannot access codecInfo: ${e.message}")
-                // 编码器已死，停止采集线程
-                isAudioRecording = false
+                handleEncoderFailure("音频编码器异常退出：${e.message}")
                 return
             }
         }
