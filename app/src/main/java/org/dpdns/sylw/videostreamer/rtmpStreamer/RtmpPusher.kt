@@ -2,6 +2,8 @@ package org.dpdns.sylw.videostreamer.rtmpStreamer
 
 import java.io.IOException
 import java.io.OutputStream
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
@@ -47,6 +49,7 @@ class RtmpPusher {
     private var appName: String = ""
     private var streamName: String = ""
     private var serverUrl: String = ""
+    private var tcUrl: String = ""
 
     private var streamId: Int = 0 // 由 createStream 响应分配
     private var transactionId = 0.0
@@ -120,7 +123,8 @@ class RtmpPusher {
             parseRtmpUrl(url)
 
             socket = Socket()
-            socket?.connect(InetSocketAddress(serverHost, serverPort), 10000)
+            val connectAddress = resolveServerAddress()
+            socket?.connect(connectAddress, 10000)
             socket?.tcpNoDelay = true
             outputStream = socket?.outputStream
             // 用 EofDetectingInputStream 包装，便于发送线程感知服务端 FIN 断连
@@ -253,7 +257,7 @@ class RtmpPusher {
             put(0x03.toByte())
             putProperty("app", appName)
             putProperty("flashVer", "FMLE/3.0 (compatible; FMSc/1.0)")
-            putProperty("tcUrl", "rtmp://$serverHost:$serverPort/$appName")
+            putProperty("tcUrl", tcUrl)
             putProperty("fpad", false)
             putProperty("capabilities", 15.0)
             putProperty("audioCodecs", 3191.0) // Support AAC (bitmask: 1<<10 + 1<<9 + ... = 3191)
@@ -1216,14 +1220,59 @@ class RtmpPusher {
     // --- 辅助方法 ---
 
     private fun parseRtmpUrl(url: String) {
-        val withoutProtocol = url.removePrefix("rtmp://")
-        val parts = withoutProtocol.split("/")
-        val hostParts = parts[0].split(":")
-        serverHost = hostParts[0]
-        serverPort = hostParts.getOrNull(1)?.toIntOrNull() ?: 1935
-        appName = parts.getOrNull(1) ?: ""
-        streamName = if (parts.size > 2) parts.subList(2, parts.size).joinToString("/") else ""
-        serverUrl = url
+        val normalizedUrl = url.trim()
+        val withoutProtocol = normalizedUrl.removePrefix("rtmp://")
+        val slashIndex = withoutProtocol.indexOf('/')
+        val authority = if (slashIndex >= 0) withoutProtocol.substring(0, slashIndex) else withoutProtocol
+        val path = if (slashIndex >= 0) withoutProtocol.substring(slashIndex + 1) else ""
+
+        if (authority.startsWith("[")) {
+            val endBracket = authority.indexOf(']')
+            if (endBracket <= 1) throw IllegalArgumentException("无效的 RTMP 地址：$normalizedUrl")
+
+            serverHost = decodeIpv6ScopeId(authority.substring(1, endBracket))
+            val portPart = authority.substring(endBracket + 1)
+            serverPort = when {
+                portPart.isEmpty() -> 1935
+                portPart.startsWith(":") -> portPart.substring(1).toIntOrNull() ?: 1935
+                else -> throw IllegalArgumentException("无效的 RTMP 地址：$normalizedUrl")
+            }
+        } else {
+            val colonCount = authority.count { it == ':' }
+            if (colonCount > 1) {
+                serverHost = decodeIpv6ScopeId(authority)
+                serverPort = 1935
+            } else if (colonCount == 1) {
+                val colonIndex = authority.lastIndexOf(':')
+                serverHost = authority.substring(0, colonIndex)
+                serverPort = authority.substring(colonIndex + 1).toIntOrNull() ?: 1935
+            } else {
+                serverHost = authority
+                serverPort = 1935
+            }
+        }
+
+        val parts = path.split("/")
+        appName = parts.getOrNull(0)?.takeIf { it.isNotEmpty() } ?: ""
+        streamName = if (parts.size > 1) parts.subList(1, parts.size).joinToString("/") else ""
+        serverUrl = normalizedUrl
+        val tcHost = if (serverHost.contains(":")) "[$serverHost]" else serverHost
+        tcUrl = "rtmp://$tcHost:$serverPort/$appName"
+    }
+
+    private fun decodeIpv6ScopeId(host: String): String {
+        return host.replace("%25", "%")
+    }
+
+    private fun resolveServerAddress(): InetSocketAddress {
+        if (serverHost.contains(":")) {
+            val address = InetAddress.getByName(serverHost)
+            if (address !is Inet6Address) {
+                throw IOException("IPv6 地址解析失败：$serverHost")
+            }
+            return InetSocketAddress(address, serverPort)
+        }
+        return InetSocketAddress(serverHost, serverPort)
     }
 
     private fun ByteBuffer.putString(s: String) {

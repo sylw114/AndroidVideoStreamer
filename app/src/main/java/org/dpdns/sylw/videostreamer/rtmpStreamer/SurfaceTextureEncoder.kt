@@ -264,8 +264,8 @@ class SurfaceTextureEncoder(
             }
             rtmpConnectThread.start()
             
-            // 等待RTMP连接（最多5秒）
-            rtmpConnectThread.join(5000)
+            // 等待RTMP连接（略长于 Socket.connect 的 10 秒超时）
+            rtmpConnectThread.join(12000)
             
             if (!rtmpConnected) {
 //                Log.w(TAG, "RTMP connection timeout or failed")
