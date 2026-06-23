@@ -654,6 +654,49 @@ class SurfaceTextureEncoder(
         val frameRate: Int
     )
 
+    private data class CapabilityQuerySize(
+        val width: Int,
+        val height: Int,
+        val isExactSupported: Boolean
+    )
+
+    private fun alignUp(value: Int, alignment: Int): Int {
+        if (alignment <= 1) return value
+        return ((value + alignment - 1) / alignment) * alignment
+    }
+
+    private fun getCapabilityQuerySize(
+        videoCapabilities: MediaCodecInfo.VideoCapabilities,
+        width: Int,
+        height: Int
+    ): CapabilityQuerySize? {
+        if (videoCapabilities.isSizeSupported(width, height)) {
+            return CapabilityQuerySize(width, height, isExactSupported = true)
+        }
+
+        val alignedWidth = alignUp(width, videoCapabilities.widthAlignment)
+        val alignedHeight = alignUp(height, videoCapabilities.heightAlignment)
+        if (videoCapabilities.isSizeSupported(alignedWidth, alignedHeight)) {
+            return CapabilityQuerySize(alignedWidth, alignedHeight, isExactSupported = true)
+        }
+
+        // 部分厂商的 H.264 能力表会拒绝高瘦竖屏尺寸，但 Surface 编码实际只受最大像素/宏块能力约束。
+        val widthRange = videoCapabilities.supportedWidths
+        val heightRange = videoCapabilities.supportedHeights
+        val maxArea = maxOf(
+            widthRange.upper.toLong() * heightRange.upper.toLong(),
+            heightRange.upper.toLong() * widthRange.upper.toLong()
+        )
+        val requestedArea = alignedWidth.toLong() * alignedHeight.toLong()
+        return if (
+            alignedWidth <= maxOf(widthRange.upper, heightRange.upper) &&
+            alignedHeight <= maxOf(widthRange.upper, heightRange.upper) &&
+            requestedArea <= maxArea
+        ) {
+            CapabilityQuerySize(alignedWidth, alignedHeight, isExactSupported = false)
+        } else null
+    }
+
     /**
      * 高帧率必须先按编码器能力协商，否则部分硬件会在 dequeueOutputBuffer 时直接进入错误态。
      */
@@ -671,13 +714,20 @@ class SurfaceTextureEncoder(
             val capabilities = runCatching { codecInfo.getCapabilitiesForType(VIDEO_MIME_TYPE) }.getOrNull()
                 ?: continue
             val videoCapabilities = capabilities.videoCapabilities ?: continue
-            if (!videoCapabilities.isSizeSupported(width, height)) continue
+            val querySize = getCapabilityQuerySize(videoCapabilities, width, height)
+                ?: continue
 
-            val supportedFps = if (videoCapabilities.areSizeAndRateSupported(width, height, requestedFps.toDouble())) {
-                requestedFps
+            val supportedFps = if (querySize.isExactSupported) {
+                if (videoCapabilities.areSizeAndRateSupported(querySize.width, querySize.height, requestedFps.toDouble())) {
+                    requestedFps
+                } else {
+                    runCatching {
+                        floor(videoCapabilities.getSupportedFrameRatesFor(querySize.width, querySize.height).upper).toInt()
+                    }.getOrDefault(30).coerceAtLeast(1)
+                }
             } else {
                 runCatching {
-                    floor(videoCapabilities.getSupportedFrameRatesFor(width, height).upper).toInt()
+                    videoCapabilities.supportedFrameRates.upper
                 }.getOrDefault(30).coerceAtLeast(1)
             }
 
