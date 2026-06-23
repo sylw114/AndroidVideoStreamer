@@ -21,7 +21,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import org.dpdns.sylw.videostreamer.camera.CameraStreamManager
 import org.dpdns.sylw.videostreamer.ui.theme.VideoStreamerTheme
 import org.dpdns.sylw.videostreamer.ui.components.SafeButton
@@ -86,6 +89,8 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             pendingAction?.invoke()
             pendingAction = null
         } else {
+            isPending = false
+            pendingAction = null
             errorMessage = cameraPermissionRequiredText
             // 授权窗口关闭后未授权，Toast 提示
             Toast.makeText(context, cameraPermissionRequiredText, Toast.LENGTH_LONG).show()
@@ -105,21 +110,22 @@ fun CameraWindow(modifier: Modifier = Modifier) {
 
             // 🔥 推流状态
             onStreamingStateChanged = { streaming ->
-                isStreaming = streaming
-                isPending = false  // 连接完成或断开，清除 pending
+                scope.launch {
+                    isStreaming = streaming
+                    isPending = false  // 连接完成或断开，清除 pending
+                }
             }
 
             onError = { error ->
-                isPending = false
-                errorMessage = error
-                // 🔥 确保在主线程显示 Toast，避免后台线程崩溃
-                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                scope.launch {
+                    isPending = false
+                    errorMessage = error
                     Toast.makeText(context, error, Toast.LENGTH_LONG).show()
                 }
             }
 
             onInfo = { message ->
-                kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+                scope.launch {
                     Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                 }
             }
@@ -135,9 +141,13 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             // 取消屏幕常亮
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else if (!isPending) {
+            isPending = true
+
             fun startStreaming() {
-                isPending = true  // 进入连接中状态
                 scope.launch {
+                    // 先让 Compose 有机会刷新按钮状态，再执行后续可能耗时的推流启动逻辑。
+                    yield()
+
                     val rtmpUrl = loadUrl(context)
                     if (rtmpUrl.isNullOrEmpty()) {
                         isPending = false
@@ -158,18 +168,22 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                     if (selectedCameraId != null) {
                         val (width, height) = selectedResolution.split("x").map { it.toInt() }
                         val currentCameraInfo = availableCameras.find { it.cameraId == selectedCameraId }
-                        cameraManager?.startStreaming(
-                            rtmpUrl,
-                            CameraStreamManager.CameraConfig(
-                                cameraId = selectedCameraId!!,
-                                width = width,
-                                height = height,
-                                frameRate = selectedFrameRate,
-                                fpsToSizes = currentCameraInfo?.fpsToSizes ?: emptyMap(),
-                                fpsToMin = currentCameraInfo?.fpsToMin ?: emptyMap()
-                            ),
-                            activity!!
+                        val cameraConfig = CameraStreamManager.CameraConfig(
+                            cameraId = selectedCameraId!!,
+                            width = width,
+                            height = height,
+                            frameRate = selectedFrameRate,
+                            fpsToSizes = currentCameraInfo?.fpsToSizes ?: emptyMap(),
+                            fpsToMin = currentCameraInfo?.fpsToMin ?: emptyMap()
                         )
+                        val currentActivity = activity!!
+                        withContext(Dispatchers.IO) {
+                            cameraManager?.startStreaming(
+                                rtmpUrl,
+                                cameraConfig,
+                                currentActivity
+                            )
+                        }
                     } else {
                         isPending = false
                     }

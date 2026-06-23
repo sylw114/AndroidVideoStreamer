@@ -55,7 +55,7 @@ fun SafeButton(
                 containerColor = activeContainerColor
             )
             SafeButtonState.PENDING -> ButtonDefaults.buttonColors(
-                containerColor = pendingContainerColor
+                disabledContainerColor = pendingContainerColor
             )
         },
         content = { content(state) }
