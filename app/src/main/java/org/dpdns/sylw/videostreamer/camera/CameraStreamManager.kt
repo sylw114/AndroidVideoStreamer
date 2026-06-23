@@ -14,6 +14,8 @@ import android.media.MediaRecorder
 import android.graphics.ImageFormat
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.ContextCompat
 import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.StreamConfig
@@ -61,6 +63,8 @@ class CameraStreamManager(private val context: Context) {
 
     // 高速模式降级标记：是否已尝试过回退到普通帧率
     private var hasAttemptedFallback = false
+
+    private val mainHandler = Handler(Looper.getMainLooper())
     
     /**
      * 初始化 Camera 管理器
@@ -165,22 +169,15 @@ class CameraStreamManager(private val context: Context) {
                 // 高速帧率（≥120fps）：仅高速度视频尺寸
                 fps >= 120 -> {
                     val candidates = mutableListOf<Size>()
-                    val hsRanges = configMap?.highSpeedVideoFpsRanges
                     for (hsSize in highSpeedSizes) {
-                        // 检查该尺寸是否支持目标帧率
-                        var supported = false
-                        if (hsRanges != null) {
-                            for (r in hsRanges) {
-                                // 如果范围包含 fps 或者范围上界 == fps
-                                if (r.lower <= fps && r.upper >= fps) {
-                                    supported = true
-                                    break
-                                }
-                            }
-                        } else {
-                            // 没有具体范围信息，只要在高速尺寸列表就认为支持
-                            supported = true
+                        val hsRangesForSize = try {
+                            configMap?.getHighSpeedVideoFpsRangesFor(hsSize)
+                        } catch (e: IllegalArgumentException) {
+                            Log.w(TAG, "无法读取高速尺寸 ${hsSize.width}x${hsSize.height} 的帧率范围", e)
+                            null
                         }
+                        val supported = hsRangesForSize?.any { it.upper == fps || (it.lower <= fps && it.upper >= fps) }
+                            ?: false
                         if (supported) {
                             candidates.add(hsSize)
                         }
@@ -280,8 +277,9 @@ class CameraStreamManager(private val context: Context) {
                     val currentConfig = cameraConfig
                     if (currentConfig != null && currentConfig.isHighSpeed && !hasAttemptedFallback) {
                         Log.w(TAG, "高速摄像头会话失败，尝试降级到普通帧率")
-                        // 注意：只释放摄像头资源，不释放 streamManager（编码器仍需保留）
-                        releaseCameraResources()
+                        // 设备已进入错误态时，主动关闭高速 session 会触发 framework 在 stopRepeating() 打 E 级栈。
+                        // 这里只关闭 camera device，保留编码器 Surface，稍后再尝试普通帧率重开。
+                        releaseCameraResources(closeCaptureSession = false)
                         hasAttemptedFallback = true
                         tryFallbackToNormalSpeed(currentConfig)
                         return
@@ -289,7 +287,6 @@ class CameraStreamManager(private val context: Context) {
 
                     // 摄像头出错也要停掉推流，避免编码器无输入却一直占用 RTMP
                     stopStreaming()
-                    releaseCameraResources()
                     onError?.invoke(errorMsg)
                 }
             })
@@ -329,6 +326,18 @@ class CameraStreamManager(private val context: Context) {
         }
 
         try {
+            if (!isCameraConfigSupported(config)) {
+                Log.w(TAG, "摄像头配置不受支持: ${config.width}x${config.height}@${config.frameRate}, highSpeed=${config.isHighSpeed}")
+                if (config.isHighSpeed && !hasAttemptedFallback) {
+                    releaseCameraResources()
+                    hasAttemptedFallback = true
+                    tryFallbackToNormalSpeed(config)
+                    return
+                }
+                onError?.invoke("摄像头不支持当前配置：${config.width}x${config.height}@${config.frameRate}fps")
+                return
+            }
+
             val sessionConfig = SessionConfiguration(
                 if(!config.isHighSpeed)SessionConfiguration.SESSION_REGULAR else SessionConfiguration.SESSION_HIGH_SPEED,
                 listOf(OutputConfiguration(targetSurface)),
@@ -339,6 +348,29 @@ class CameraStreamManager(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create camera capture session", e)
             onError?.invoke("创建摄像头会话失败: ${e.message}")
+        }
+    }
+
+    private fun isCameraConfigSupported(config: CameraConfig): Boolean {
+        val selectedSize = Size(config.width, config.height)
+        val supportedSizes = config.fpsToSizes[config.frameRate]
+        if (supportedSizes != null && selectedSize !in supportedSizes) {
+            return false
+        }
+
+        if (!config.isHighSpeed) {
+            return true
+        }
+
+        val manager = cameraManager ?: return false
+        return try {
+            val characteristics = manager.getCameraCharacteristics(config.cameraId)
+            val configMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val ranges = configMap?.getHighSpeedVideoFpsRangesFor(selectedSize) ?: return false
+            ranges.any { it.upper == config.frameRate || (it.lower <= config.frameRate && it.upper >= config.frameRate) }
+        } catch (e: Exception) {
+            Log.w(TAG, "校验高速摄像头配置失败", e)
+            false
         }
     }
 
@@ -415,18 +447,22 @@ class CameraStreamManager(private val context: Context) {
     private fun tryFallbackToNormalSpeed(originalConfig: CameraConfig) {
         // 从 fpsToSizes 中找到最高的非高速帧率（<120fps）
         val fallbackFps = originalConfig.fpsToSizes.keys
-            .filter { it < 120 }
+            .filter { fps ->
+                fps < 120 && originalConfig.fpsToSizes[fps]?.any {
+                    it.width == originalConfig.width && it.height == originalConfig.height
+                } == true
+            }
             .maxOrNull()
 
         if (fallbackFps == null || fallbackFps <= 0) {
             Log.e(TAG, "无法找到可用的普通帧率进行降级")
-            onError?.invoke("高速摄像头模式不兼容，且无可用的普通帧率")
+            onError?.invoke("高速摄像头模式不兼容，且当前分辨率无可用的普通帧率，请降低分辨率后重试")
             return
         }
 
         Log.d(TAG, "降级到普通帧率: ${originalConfig.frameRate}fps → ${fallbackFps}fps")
 
-        // 构建降级配置：保持分辨率不变，降低帧率，关闭高速模式
+        // 编码器 Surface 已按原分辨率创建，降级只能改帧率，不能在同一次推流中改分辨率。
         val fallbackConfig = CameraConfig(
             cameraId = originalConfig.cameraId,
             width = originalConfig.width,
@@ -443,7 +479,9 @@ class CameraStreamManager(private val context: Context) {
                 onError?.invoke("高速摄像头模式降级失败：编码器 Surface 不可用")
                 return
             }
-            openCamera(fallbackConfig, surface)
+            mainHandler.postDelayed({
+                openCamera(fallbackConfig, surface)
+            }, 500L)
         } catch (e: Exception) {
             Log.e(TAG, "降级到普通帧率失败", e)
             onError?.invoke("降级到普通帧率失败: ${e.message}")
@@ -555,20 +593,25 @@ class CameraStreamManager(private val context: Context) {
     /**
      * 释放摄像头资源（不停止协议层）
      */
-    private fun releaseCameraResources() {
+    private fun releaseCameraResources(closeCaptureSession: Boolean = true) {
         Log.d(TAG, "Releasing camera resources...")
 
         // Closing a CameraCaptureSession may internally call stopRepeating() which can
         // throw CameraAccessException (CAMERA_ERROR) if the device is already in an
         // error/closed state. Guard these calls to avoid uncaught exceptions coming
         // from camera framework threads (see logs: "Exception while stopping repeating").
-        try {
-            captureSession?.close()
-        } catch (e: Exception) {
-            // Catch CameraAccessException, IllegalStateException and any runtime
-            // exception coming from the framework and log it. Do not rethrow.
-            Log.w(TAG, "Ignored exception while closing captureSession", e)
-        } finally {
+        if (closeCaptureSession) {
+            try {
+                captureSession?.close()
+            } catch (e: Exception) {
+                // Catch CameraAccessException, IllegalStateException and any runtime
+                // exception coming from the framework and log it. Do not rethrow.
+                Log.w(TAG, "Ignored exception while closing captureSession", e)
+            }
+        } else {
+            Log.w(TAG, "摄像头已进入错误态，跳过 captureSession.close()")
+        }
+        if (!closeCaptureSession || captureSession != null) {
             captureSession = null
         }
 
