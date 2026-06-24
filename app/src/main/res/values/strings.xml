@@ -25,6 +25,7 @@
     <string name="settings_enable_opus_compression">启用 Opus 压缩</string>
     <string name="settings_opus_frame_duration_value">Opus 帧长：%1$d ms</string>
     <string name="settings_milliseconds_value">%1$d ms</string>
+    <string name="settings_opus_frame_duration_adjusted">当前设备的 Opus 编码器不支持 %1$d ms，已改用 %2$d ms</string>
     <string name="settings_opus_bitrate_kbps">Opus 码率 (kbps)</string>
     <string name="settings_latency_recording">启用延迟记录与导出</string>
 

@@ -25,6 +25,7 @@
     <string name="settings_enable_opus_compression">Enable Opus compression</string>
     <string name="settings_opus_frame_duration_value">Opus frame duration: %1$d ms</string>
     <string name="settings_milliseconds_value">%1$d ms</string>
+    <string name="settings_opus_frame_duration_adjusted">The Opus encoder on this device does not support %1$d ms. Switched to %2$d ms.</string>
     <string name="settings_opus_bitrate_kbps">Opus bitrate (kbps)</string>
     <string name="settings_latency_recording">Enable latency recording and export</string>
 

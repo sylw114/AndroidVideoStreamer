@@ -25,9 +25,12 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.dpdns.sylw.videostreamer.udpAudio.OpusFrameDurationResolver
 
 val Context.dataStore by preferencesDataStore("settings")
 
@@ -164,6 +167,27 @@ fun SettingWindow(
     val protocols = listOf("RTMP")
 
     fun save(action: suspend () -> Unit) = scope.launch { action() }
+
+    fun applyOpusFrameMs(frameMs: Int) {
+        scope.launch {
+            val supportedFrameMs = withContext(Dispatchers.Default) {
+                OpusFrameDurationResolver.resolveSupportedFrameMs(
+                    requestedFrameMs = frameMs,
+                    bitrate = udpAudioOpusBitrate * 1000
+                )
+            }
+            udpAudioOpusFrameMs = supportedFrameMs
+            StreamConfig.setUdpAudioOpusFrameMs(supportedFrameMs)
+            saveUdpAudioOpusFrameMs(context, supportedFrameMs)
+            if (supportedFrameMs != frameMs) {
+                Toast.makeText(
+                    context,
+                    context.getString(R.string.settings_opus_frame_duration_adjusted, frameMs, supportedFrameMs),
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         // 🔥 WindowForSelecting 已预加载到 StreamConfig，这里只需读内存
@@ -398,6 +422,7 @@ fun SettingWindow(
                     udpAudioOpusEnabled = enabled
                     StreamConfig.setUdpAudioOpusEnabled(enabled)
                     save { saveUdpAudioOpusEnabled(context, enabled) }
+                    if (enabled) applyOpusFrameMs(udpAudioOpusFrameMs)
                 }
             )
             Text(stringResource(R.string.settings_enable_opus_compression))
@@ -409,9 +434,7 @@ fun SettingWindow(
                     CheckboxOption(
                         checked = udpAudioOpusFrameMs == frameMs,
                         onChecked = {
-                            udpAudioOpusFrameMs = frameMs
-                            StreamConfig.setUdpAudioOpusFrameMs(frameMs)
-                            save { saveUdpAudioOpusFrameMs(context, frameMs) }
+                            applyOpusFrameMs(frameMs)
                         },
                         label = stringResource(R.string.settings_milliseconds_value, frameMs)
                     )

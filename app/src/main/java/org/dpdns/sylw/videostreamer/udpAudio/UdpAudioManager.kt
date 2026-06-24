@@ -156,6 +156,7 @@ class UdpAudioManager {
                 // 4. 发送握手包
                 // 在握手前计算音频配置，确保发送的是真实支持的配置
                 resolveAudioConfig()
+                resolveOpusFrameMs()
                 sendHandshake()
                 
                 onConnectionStateChanged?.invoke(true)
@@ -184,6 +185,21 @@ class UdpAudioManager {
                 currentChannelConfig = f.second
                 return
             }
+        }
+    }
+
+    private fun resolveOpusFrameMs() {
+        if (!isOpusEnabled) return
+        val channelCount = if (currentChannelConfig == AudioFormat.CHANNEL_IN_STEREO) 2 else 1
+        val supportedFrameMs = OpusFrameDurationResolver.resolveSupportedFrameMs(
+            requestedFrameMs = opusFrameMs,
+            sampleRate = currentSampleRate,
+            channelCount = channelCount,
+            bitrate = opusBitrate
+        )
+        if (supportedFrameMs != opusFrameMs) {
+            Log.w(TAG, "Opus 编码器不支持 ${opusFrameMs}ms，改用实际支持的 ${supportedFrameMs}ms")
+            opusFrameMs = supportedFrameMs
         }
     }
 
