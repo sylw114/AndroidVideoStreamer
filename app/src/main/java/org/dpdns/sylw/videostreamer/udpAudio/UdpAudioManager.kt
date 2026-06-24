@@ -4,6 +4,8 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
+import android.media.MediaCodec
+import android.media.MediaFormat
 import android.util.Log
 import kotlinx.coroutines.*
 import org.dpdns.sylw.videostreamer.R
@@ -23,6 +25,8 @@ class UdpAudioManager {
     companion object {
         private const val TAG = "UdpAudioManager"
         private const val LATENCY_INVALID_THRESHOLD = -20L // ms
+        private const val CODEC_PCM = 0x00
+        private const val CODEC_OPUS = 0x01
     }
 
     data class LatencyRecord(val seq: Int, val minLatency: Long, val maxLatency: Long)
@@ -32,8 +36,12 @@ class UdpAudioManager {
     private var udpPort: Int = 0
     private var isEnabled: Boolean = false
     private var isRedundantTransmissionEnabled: Boolean = StreamConfig.getUdpAudioRedundant() ?: false
+    private var isOpusEnabled: Boolean = StreamConfig.getUdpAudioOpusEnabled() ?: false
+    private var opusBitrate: Int = StreamConfig.getUdpAudioOpusBitrate() ?: 32000
+    private var opusFrameMs: Int = StreamConfig.getUdpAudioOpusFrameMs() ?: 20
 
     private var audioRecord: AudioRecord? = null
+    private var opusEncoder: OpusUdpAudioEncoder? = null
     private var captureThread: Thread? = null
     private var isCapturing: Boolean = false
 
@@ -62,12 +70,24 @@ class UdpAudioManager {
 
     fun getLatencyLogFile(): File? = latencyLogFile
 
-    fun updateConfig(ip: String, tcpPort: Int, udpPort: Int, enabled: Boolean, redundantTransmission: Boolean = StreamConfig.getUdpAudioRedundant() ?: false) {
+    fun updateConfig(
+        ip: String,
+        tcpPort: Int,
+        udpPort: Int,
+        enabled: Boolean,
+        redundantTransmission: Boolean = StreamConfig.getUdpAudioRedundant() ?: false,
+        opusEnabled: Boolean = StreamConfig.getUdpAudioOpusEnabled() ?: false,
+        opusBitrate: Int = StreamConfig.getUdpAudioOpusBitrate() ?: 32000,
+        opusFrameMs: Int = StreamConfig.getUdpAudioOpusFrameMs() ?: 20
+    ) {
         this.serverIp = ip
         this.tcpPort = tcpPort
         this.udpPort = udpPort
         this.isEnabled = enabled
         this.isRedundantTransmissionEnabled = redundantTransmission
+        this.isOpusEnabled = opusEnabled
+        this.opusBitrate = opusBitrate.coerceIn(8000, 256000)
+        this.opusFrameMs = opusFrameMs.takeIf { it in setOf(10, 20, 40) } ?: 20
         if (!enabled) stop()
     }
 
@@ -170,9 +190,11 @@ class UdpAudioManager {
     private fun sendHandshake() {
         val sampleRateIndex = if (currentSampleRate == 48000) 0x01.toByte() else 0x00.toByte()
         val channels = if (currentChannelConfig == AudioFormat.CHANNEL_IN_STEREO) 0x02.toByte() else 0x01.toByte()
+        val codec = if (isOpusEnabled) CODEC_OPUS.toByte() else CODEC_PCM.toByte()
+        val bitrateKbps = (opusBitrate / 1000).coerceIn(0, 255).toByte()
         
-        // [SampleRateIdx][Channels]
-        val handshake = byteArrayOf(sampleRateIndex, channels)
+        // 固定 6 字节配置包: [Version][SampleRateIdx][Channels][Codec][FrameMs][OpusKbps]
+        val handshake = byteArrayOf(0x01, sampleRateIndex, channels, codec, opusFrameMs.toByte(), bitrateKbps)
         tcpOutputStream?.write(handshake)
         tcpOutputStream?.flush()
     }
@@ -181,6 +203,7 @@ class UdpAudioManager {
         isCapturing = false
         captureThread?.interrupt()
         captureThread = null
+        releaseOpusEncoder()
         releaseAudioRecord()
         disconnect()
     }
@@ -226,6 +249,14 @@ class UdpAudioManager {
         }
 
         audioRecord?.startRecording()
+        if (isOpusEnabled) {
+            opusEncoder = OpusUdpAudioEncoder(
+                sampleRate = currentSampleRate,
+                channelCount = if (currentChannelConfig == AudioFormat.CHANNEL_IN_STEREO) 2 else 1,
+                bitrate = opusBitrate,
+                frameMs = opusFrameMs
+            )
+        }
         isCapturing = true
         sequenceNumber = 0u
         captureThread = Thread({ audioCaptureLoop(bufferSize) }, "UdpAudioCaptureThread")
@@ -334,28 +365,11 @@ class UdpAudioManager {
             try {
                 val bytesRead = audioRecord?.read(buffer, 0, bufferSize) ?: 0
                 if (bytesRead > 0) {
-                    var offset = 0
-                    while (offset < bytesRead) {
-                        val remaining = bytesRead - offset
-                        val chunkSize = minOf(remaining, maxPayloadSize)
-                        
-                        // 每个分片携带 Seq 和 数据
-                        val packetData = ByteArray(chunkSize + 1)
-                        
-                        packetTimestampMap[sequenceNumber.toInt()] = System.currentTimeMillis()
-                        packetData[0] = sequenceNumber.toByte()
-                        System.arraycopy(buffer, offset, packetData, 1, chunkSize)
-
-                        // 循环递增序号，范围 0x00 - 0xFF
-                        sequenceNumber ++
-
-                        val repeatCount = if (isRedundantTransmissionEnabled) 3 else 1
-                        repeat(repeatCount) {
-                            val packet = DatagramPacket(packetData, packetData.size, serverAddress, udpPort)
-                            udpSocket?.send(packet)
-                        }
-                        
-                        offset += chunkSize
+                    val encodedFrames = opusEncoder?.encode(buffer, bytesRead)
+                    if (encodedFrames != null) {
+                        encodedFrames.forEach { sendOpusPayload(it) }
+                    } else {
+                        sendPcmPayload(buffer, bytesRead, maxPayloadSize)
                     }
                 }
                 Thread.yield()
@@ -365,9 +379,154 @@ class UdpAudioManager {
         }
     }
 
+    private fun sendPcmPayload(buffer: ByteArray, bytesRead: Int, maxPayloadSize: Int) {
+        var offset = 0
+        while (offset < bytesRead) {
+            val remaining = bytesRead - offset
+            val chunkSize = minOf(remaining, maxPayloadSize)
+            val payload = ByteArray(chunkSize)
+            System.arraycopy(buffer, offset, payload, 0, chunkSize)
+            sendAudioPayload(payload, maxPayloadSize)
+            offset += chunkSize
+        }
+    }
+
+    private fun sendAudioPayload(payload: ByteArray, maxPayloadSize: Int) {
+        var offset = 0
+        while (offset < payload.size) {
+            val chunkSize = minOf(payload.size - offset, maxPayloadSize)
+            val packetData = ByteArray(chunkSize + 1)
+
+            packetTimestampMap[sequenceNumber.toInt()] = System.currentTimeMillis()
+            packetData[0] = sequenceNumber.toByte()
+            System.arraycopy(payload, offset, packetData, 1, chunkSize)
+            sequenceNumber++
+
+            val repeatCount = if (isRedundantTransmissionEnabled) 3 else 1
+            repeat(repeatCount) {
+                val packet = DatagramPacket(packetData, packetData.size, serverAddress, udpPort)
+                udpSocket?.send(packet)
+            }
+            offset += chunkSize
+        }
+    }
+
+    private fun sendOpusPayload(payload: ByteArray) {
+        sendSingleAudioPacket(payload)
+    }
+
+    private fun sendSingleAudioPacket(payload: ByteArray) {
+        val packetData = ByteArray(payload.size + 1)
+
+        packetTimestampMap[sequenceNumber.toInt()] = System.currentTimeMillis()
+        packetData[0] = sequenceNumber.toByte()
+        System.arraycopy(payload, 0, packetData, 1, payload.size)
+        sequenceNumber++
+
+        val repeatCount = if (isRedundantTransmissionEnabled) 3 else 1
+        repeat(repeatCount) {
+            val packet = DatagramPacket(packetData, packetData.size, serverAddress, udpPort)
+            udpSocket?.send(packet)
+        }
+    }
+
     private fun releaseAudioRecord() {
         audioRecord?.stop()
         audioRecord?.release()
         audioRecord = null
+    }
+
+    private fun releaseOpusEncoder() {
+        opusEncoder?.release()
+        opusEncoder = null
+    }
+
+    private class OpusUdpAudioEncoder(
+        private val sampleRate: Int,
+        private val channelCount: Int,
+        private val bitrate: Int,
+        private val frameMs: Int
+    ) {
+        private val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
+        private val frameBytes = sampleRate * frameMs / 1000 * channelCount * 2
+        private val pcmBuffer = ByteArray(frameBytes * 2)
+        private var pcmSize = 0
+        private var presentationTimeUs = 0L
+
+        init {
+            val format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, sampleRate, channelCount).apply {
+                setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, frameBytes)
+            }
+            codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec.start()
+        }
+
+        fun encode(input: ByteArray, size: Int): List<ByteArray> {
+            val frames = mutableListOf<ByteArray>()
+            var offset = 0
+            while (offset < size) {
+                val copySize = minOf(size - offset, pcmBuffer.size - pcmSize)
+                System.arraycopy(input, offset, pcmBuffer, pcmSize, copySize)
+                pcmSize += copySize
+                offset += copySize
+
+                while (pcmSize >= frameBytes) {
+                    if (!queueFrame()) break
+                    frames += drain()
+                    val remaining = pcmSize - frameBytes
+                    if (remaining > 0) {
+                        System.arraycopy(pcmBuffer, frameBytes, pcmBuffer, 0, remaining)
+                    }
+                    pcmSize = remaining
+                }
+            }
+            frames += drain()
+            return frames
+        }
+
+        private fun queueFrame(): Boolean {
+            val inputIndex = codec.dequeueInputBuffer(10_000)
+            if (inputIndex < 0) return false
+            val inputBuffer = codec.getInputBuffer(inputIndex) ?: return false
+            inputBuffer.clear()
+            inputBuffer.put(pcmBuffer, 0, frameBytes)
+            codec.queueInputBuffer(inputIndex, 0, frameBytes, presentationTimeUs, 0)
+            presentationTimeUs += frameMs * 1000L
+            return true
+        }
+
+        private fun drain(): List<ByteArray> {
+            val frames = mutableListOf<ByteArray>()
+            val info = MediaCodec.BufferInfo()
+            while (true) {
+                val outputIndex = codec.dequeueOutputBuffer(info, 0)
+                if (outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER) break
+                if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) continue
+                if (outputIndex < 0) continue
+
+                val isCodecConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+                if (!isCodecConfig && info.size > 0) {
+                    val outputBuffer = codec.getOutputBuffer(outputIndex)
+                    if (outputBuffer != null) {
+                        outputBuffer.position(info.offset)
+                        outputBuffer.limit(info.offset + info.size)
+                        val data = ByteArray(info.size)
+                        outputBuffer.get(data)
+                        frames += data
+                    }
+                }
+                codec.releaseOutputBuffer(outputIndex, false)
+            }
+            return frames
+        }
+
+        fun release() {
+            try {
+                codec.stop()
+            } catch (_: Exception) {
+            }
+            codec.release()
+        }
     }
 }

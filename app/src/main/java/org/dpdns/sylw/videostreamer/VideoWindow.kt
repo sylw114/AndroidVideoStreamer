@@ -560,10 +560,21 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                             }
                             val tcpPort = loadTcpControlPort(context)
                             val udpPort = loadUdpAudioUdpPort(context)
+                            val opusEnabled = loadUdpAudioOpusEnabled(context)
+                            val opusBitrate = loadUdpAudioOpusBitrate(context)
+                            val opusFrameMs = loadUdpAudioOpusFrameMs(context)
                             mediaProjectionService?.let { binder ->
                                 val config = binder.getService().config
                                 binder.setAudioCaptureMode(isVideoPush = false)
-                                udpAudioManager?.updateConfig(ip, tcpPort, udpPort, true)
+                                udpAudioManager?.updateConfig(
+                                    ip = ip,
+                                    tcpPort = tcpPort,
+                                    udpPort = udpPort,
+                                    enabled = true,
+                                    opusEnabled = opusEnabled,
+                                    opusBitrate = opusBitrate,
+                                    opusFrameMs = opusFrameMs
+                                )
 
                                 isUdpAudioPending = true  // 进入连接中状态
 

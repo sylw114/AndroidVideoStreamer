@@ -22,6 +22,10 @@
     <string name="settings_enable_redundant_transmission">启用冗余传输</string>
     <string name="settings_redundant_transmission_tip">启用后会增加网络负载，但可提升音频稳定性。</string>
     <string name="settings_info_content_description">说明</string>
+    <string name="settings_enable_opus_compression">启用 Opus 压缩</string>
+    <string name="settings_opus_frame_duration_value">Opus 帧长：%1$d ms</string>
+    <string name="settings_milliseconds_value">%1$d ms</string>
+    <string name="settings_opus_bitrate_kbps">Opus 码率 (kbps)</string>
     <string name="settings_latency_recording">启用延迟记录与导出</string>
 
     <string name="common_save">保存</string>

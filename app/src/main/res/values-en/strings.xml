@@ -22,6 +22,10 @@
     <string name="settings_enable_redundant_transmission">Enable Redundant Transmission</string>
     <string name="settings_redundant_transmission_tip">Enabling this will increase network load but improve audio stability.</string>
     <string name="settings_info_content_description">Info</string>
+    <string name="settings_enable_opus_compression">Enable Opus compression</string>
+    <string name="settings_opus_frame_duration_value">Opus frame duration: %1$d ms</string>
+    <string name="settings_milliseconds_value">%1$d ms</string>
+    <string name="settings_opus_bitrate_kbps">Opus bitrate (kbps)</string>
     <string name="settings_latency_recording">Enable latency recording and export</string>
 
     <string name="common_save">Save</string>

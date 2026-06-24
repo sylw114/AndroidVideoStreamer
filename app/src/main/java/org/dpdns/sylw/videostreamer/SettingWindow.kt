@@ -61,6 +61,12 @@ object StreamConfig {
     fun setUdpAudioPort(v: Int?) { state["udpPort"] = v }
     fun getUdpAudioRedundant(): Boolean? = state["redundant"] as? Boolean
     fun setUdpAudioRedundant(v: Boolean?) { state["redundant"] = v }
+    fun getUdpAudioOpusEnabled(): Boolean? = state["udpOpusEnabled"] as? Boolean
+    fun setUdpAudioOpusEnabled(v: Boolean?) { state["udpOpusEnabled"] = v }
+    fun getUdpAudioOpusBitrate(): Int? = state["udpOpusBitrate"] as? Int
+    fun setUdpAudioOpusBitrate(v: Int?) { state["udpOpusBitrate"] = v }
+    fun getUdpAudioOpusFrameMs(): Int? = state["udpOpusFrameMs"] as? Int
+    fun setUdpAudioOpusFrameMs(v: Int?) { state["udpOpusFrameMs"] = v }
     fun getLatencyRecordingEnabled(): Boolean? = state["latencyRecording"] as? Boolean
     fun setLatencyRecordingEnabled(v: Boolean?) { state["latencyRecording"] = v }
     fun getAppLanguage(): String? = state["language"] as? String
@@ -77,6 +83,9 @@ private val PREF_UDP_AUDIO_IP = stringPreferencesKey("udp_audio_ip")
 private val PREF_TCP_CONTROL_PORT = intPreferencesKey("tcp_control_port")
 private val PREF_UDP_AUDIO_PORT = intPreferencesKey("udp_audio_port")
 private val PREF_UDP_AUDIO_REDUNDANT = booleanPreferencesKey("udp_audio_redundant")
+private val PREF_UDP_AUDIO_OPUS_ENABLED = booleanPreferencesKey("udp_audio_opus_enabled")
+private val PREF_UDP_AUDIO_OPUS_BITRATE = intPreferencesKey("udp_audio_opus_bitrate")
+private val PREF_UDP_AUDIO_OPUS_FRAME_MS = intPreferencesKey("udp_audio_opus_frame_ms")
 private val PREF_LATENCY_RECORDING = booleanPreferencesKey("latency_recording")
 
 suspend fun saveUrl(context: Context, url: String) = prefSave(context, PREF_STREAM_URL, url)
@@ -99,6 +108,12 @@ suspend fun saveUdpAudioPort(context: Context, port: Int) = prefSave(context, PR
 suspend fun loadUdpAudioUdpPort(context: Context): Int = prefLoad(context, PREF_UDP_AUDIO_PORT, 9000)
 suspend fun saveUdpAudioRedundant(context: Context, enabled: Boolean) = prefSave(context, PREF_UDP_AUDIO_REDUNDANT, enabled)
 suspend fun loadUdpAudioRedundant(context: Context): Boolean = prefLoad(context, PREF_UDP_AUDIO_REDUNDANT, false)
+suspend fun saveUdpAudioOpusEnabled(context: Context, enabled: Boolean) = prefSave(context, PREF_UDP_AUDIO_OPUS_ENABLED, enabled)
+suspend fun loadUdpAudioOpusEnabled(context: Context): Boolean = prefLoad(context, PREF_UDP_AUDIO_OPUS_ENABLED, false)
+suspend fun saveUdpAudioOpusBitrate(context: Context, bitrate: Int) = prefSave(context, PREF_UDP_AUDIO_OPUS_BITRATE, bitrate)
+suspend fun loadUdpAudioOpusBitrate(context: Context): Int = prefLoad(context, PREF_UDP_AUDIO_OPUS_BITRATE, 32000)
+suspend fun saveUdpAudioOpusFrameMs(context: Context, frameMs: Int) = prefSave(context, PREF_UDP_AUDIO_OPUS_FRAME_MS, frameMs)
+suspend fun loadUdpAudioOpusFrameMs(context: Context): Int = prefLoad(context, PREF_UDP_AUDIO_OPUS_FRAME_MS, 20)
 suspend fun saveLatencyRecordingEnabled(context: Context, enabled: Boolean) = prefSave(context, PREF_LATENCY_RECORDING, enabled)
 suspend fun loadLatencyRecordingEnabled(context: Context): Boolean = prefLoad(context, PREF_LATENCY_RECORDING, false)
 
@@ -138,6 +153,10 @@ fun SettingWindow(
     var tcpControlPort by remember { mutableStateOf("9998") }
     var udpAudioPort by remember { mutableStateOf("9999") }
     var udpAudioRedundant by remember { mutableStateOf(false) }
+    var udpAudioOpusEnabled by remember { mutableStateOf(false) }
+    var udpAudioOpusBitrate by remember { mutableIntStateOf(32) }
+    var udpAudioOpusBitrateInput by remember { mutableStateOf("32") }
+    var udpAudioOpusFrameMs by remember { mutableIntStateOf(20) }
     var latencyRecordingEnabled by remember { mutableStateOf(false) }
 
     val scrollState = rememberScrollState()
@@ -181,6 +200,17 @@ fun SettingWindow(
 
         udpAudioRedundant = loadUdpAudioRedundant(context)
         StreamConfig.setUdpAudioRedundant(udpAudioRedundant)
+
+        udpAudioOpusEnabled = loadUdpAudioOpusEnabled(context)
+        StreamConfig.setUdpAudioOpusEnabled(udpAudioOpusEnabled)
+
+        val opusBitrate = loadUdpAudioOpusBitrate(context)
+        StreamConfig.setUdpAudioOpusBitrate(opusBitrate)
+        udpAudioOpusBitrate = opusBitrate / 1000
+        udpAudioOpusBitrateInput = udpAudioOpusBitrate.toString()
+
+        udpAudioOpusFrameMs = loadUdpAudioOpusFrameMs(context)
+        StreamConfig.setUdpAudioOpusFrameMs(udpAudioOpusFrameMs)
 
         latencyRecordingEnabled = loadLatencyRecordingEnabled(context)
         StreamConfig.setLatencyRecordingEnabled(latencyRecordingEnabled)
@@ -360,6 +390,54 @@ fun SettingWindow(
                 onClick = { Toast.makeText(context, context.getString(R.string.settings_redundant_transmission_tip), Toast.LENGTH_LONG).show() },
                 modifier = Modifier.size(24.dp)
             ) { Icon(Icons.Default.Info, contentDescription = stringResource(R.string.settings_info_content_description), tint = Color.Gray) }
+        }
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Checkbox(
+                checked = udpAudioOpusEnabled,
+                onCheckedChange = { enabled ->
+                    udpAudioOpusEnabled = enabled
+                    StreamConfig.setUdpAudioOpusEnabled(enabled)
+                    save { saveUdpAudioOpusEnabled(context, enabled) }
+                }
+            )
+            Text(stringResource(R.string.settings_enable_opus_compression))
+        }
+        if (udpAudioOpusEnabled) {
+            SectionLabel(stringResource(R.string.settings_opus_frame_duration_value, udpAudioOpusFrameMs))
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                listOf(10, 20, 40).forEach { frameMs ->
+                    CheckboxOption(
+                        checked = udpAudioOpusFrameMs == frameMs,
+                        onChecked = {
+                            udpAudioOpusFrameMs = frameMs
+                            StreamConfig.setUdpAudioOpusFrameMs(frameMs)
+                            save { saveUdpAudioOpusFrameMs(context, frameMs) }
+                        },
+                        label = stringResource(R.string.settings_milliseconds_value, frameMs)
+                    )
+                }
+            }
+            OutlinedTextField(
+                value = udpAudioOpusBitrateInput,
+                onValueChange = { udpAudioOpusBitrateInput = it },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                singleLine = true,
+                label = { Text(stringResource(R.string.settings_opus_bitrate_kbps)) },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Button(
+                onClick = {
+                    udpAudioOpusBitrateInput.toIntOrNull()?.let { input ->
+                        udpAudioOpusBitrate = input.coerceIn(8, 256)
+                        udpAudioOpusBitrateInput = udpAudioOpusBitrate.toString()
+                        val bps = udpAudioOpusBitrate * 1000
+                        StreamConfig.setUdpAudioOpusBitrate(bps)
+                        save { saveUdpAudioOpusBitrate(context, bps) }
+                    }
+                },
+                modifier = Modifier.width(80.dp).padding(top = 8.dp),
+                shape = androidx.compose.ui.graphics.RectangleShape
+            ) { Text(stringResource(R.string.common_save)) }
         }
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Checkbox(
