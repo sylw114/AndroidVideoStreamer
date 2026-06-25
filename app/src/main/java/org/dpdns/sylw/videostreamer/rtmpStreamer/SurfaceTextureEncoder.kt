@@ -31,7 +31,6 @@ class SurfaceTextureEncoder(
     private val audioSampleRate: Int = 48000,  // 音频采样率
     private val audioChannelCount: Int = 2,    // 音频声道数
     private val audioBitrate: Int = 128000,     // 音频码率 bps
-    private val externalAudioSource: (() -> Pair<ByteArray, Long>?)? = null,  // 外部 PCM 音频源回调（返回 PCM 数据和采集时间戳）
     private val onSurfaceReady: ((Surface) -> Unit)
 ) {
     companion object {
@@ -75,12 +74,7 @@ class SurfaceTextureEncoder(
     // 音频编码相关
     private var mediaCodecAudio: MediaCodec? = null
     private var audioBufferInfo: MediaCodec.BufferInfo? = null
-    private var audioThread: Thread? = null
     private var isAudioRecording = false
-    private var inputBuffers: Array<ByteBuffer>? = null  // 用于 API < 21 的兼容性
-    
-    // 外部音频源标记
-    private val useExternalAudio = externalAudioSource != null
     
     // 编码线程
     private var encodeThread: Thread? = null
@@ -283,13 +277,7 @@ class SurfaceTextureEncoder(
 
             createVirtualDisplay()
             if (useAudio) {
-                // 关键修复：无论是否使用外部音频源，都需要初始化 MediaCodec 音频编码器
-                if (useExternalAudio) {
-//                    Log.d(TAG, "Using external PCM audio source, initializing MediaCodec encoder")
-                } else {
-//                    Log.d(TAG, "Using internal audio recording")
-                }
-                initAudioEncoder()  // 🔥 总是初始化音频编码器
+                initAudioEncoder()
             }
 
             isEncoding = true
@@ -1032,135 +1020,25 @@ class SurfaceTextureEncoder(
      * 开始音频录制
      */
     private fun startAudioRecording() {
-        if (useExternalAudio) {
-//            Log.d("AudioCapture", "🔍 Starting external audio capture")
-            
-            // 🔥 初始化音频时间戳计数器
-            audioLastOutputTimeMs = 0.0
-//            Log.d("AudioEncode", "🎯 Audio timestamp counter initialized")
-            
-            startExternalAudioCapture()
-            
-            // 🔥 注意：不再提前提取 ASC，因为编码器需要先输入 PCM 才能输出
-            // ASC 会在 encodeAndSendAudioData 中自然提取
-//            Log.d("AudioCapture", "ℹ️ ASC will be extracted during first encoding")
-        } else {
-            // 如果没有 external audio source，改用 MediaCodec 编码
-//            Log.d("AudioCapture", "Audio encoder mode not yet implemented, audio disabled")
-        }
+        isAudioRecording = true
+        audioLastOutputTimeMs = 0.0
+        // ASC 会在首次提交 PCM 后由 MediaCodec 自然输出。
     }
 
-    
     /**
-     * 从外部 PCM 源捕获音频 - 修复版
+     * 提交外部 PCM 数据到音频编码器
      */
-    private fun startExternalAudioCapture() {
-        audioThread = Thread({
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-            
-            val bytesPerFrame = audioSampleRate * audioChannelCount * 2 / effectiveVideoFrameRate // 每帧的字节数
-            var frameCount = 0L
-            var consecutiveFailures = 0
-            val maxFailures = 100
-            var lastSuccessTime = System.currentTimeMillis() // 🔥 记录最后成功时间
-            
-//            Log.d("AudioCapture", "🎵 External audio capture started, expected frame size: $bytesPerFrame bytes")
-//            Log.d("AudioCapture", "Audio params: sampleRate=$audioSampleRate, channels=$audioChannelCount, frameRate=$frameRate")
-//            Log.d("AudioCapture", "🔍 externalAudioSource is ${if (externalAudioSource != null) "set" else "NULL!"}")
+    fun submitExternalAudioData(pcmData: ByteArray, size: Int, timestampNs: Long) {
+        if (!isEncoding || !isAudioRecording || mediaCodecAudio == null || size <= 0) {
+            return
+        }
 
-            while (!Thread.interrupted() && isEncoding && consecutiveFailures < maxFailures) {
-                try {
-                    // 🔥 关键诊断：检查 externalAudioSource 回调
-                    if (externalAudioSource == null) {
-//                        Log.e("AudioEncode", "❌ [CRITICAL] externalAudioSource is NULL! Cannot get PCM data!")
-                        Thread.sleep(10)
-                        continue
-                    }
-                    
-                    val result = externalAudioSource.invoke()
-                    
-                    // 🔥 详细诊断 PCM 数据获取
-                    if (result == null) {
-                        consecutiveFailures++
-                        // 🔥 关键修复：增加等待时间，避免过度消耗 CPU 和造成假性繁忙
-                        val sleepTime = when {
-                            consecutiveFailures <= 5 -> 10L  // 前 5 次快速重试
-                            consecutiveFailures <= 20 -> 50L // 中期放慢速度
-                            else -> 100L                     // 长期无数据时大幅降低频率
-                        }
-                        
-                        // 🔥 降低日志频率，只在关键节点打印
-                        if (consecutiveFailures <= 5 || consecutiveFailures % 10 == 0) {
-//                            Log.w("AudioEncode", "⚠️ [Frame #$frameCount] externalAudioSource returned NULL! Failures: $consecutiveFailures, sleep=${sleepTime}ms")
-                        }
-                        Thread.sleep(sleepTime)
-                        continue
-                    }
-                    
-                    val (pcmData, timestampNs) = result
-                    
-                    if (pcmData.isEmpty()) {
-                        consecutiveFailures++
-                        // 🔥 关键修复：增加等待时间
-                        val sleepTime = when {
-                            consecutiveFailures <= 5 -> 10L
-                            consecutiveFailures <= 20 -> 50L
-                            else -> 100L
-                        }
-                        
-                        if (consecutiveFailures <= 5 || consecutiveFailures % 10 == 0) {
-//                            Log.w("AudioEncode", "⚠️ [Frame #$frameCount] externalAudioSource returned EMPTY array! Failures: $consecutiveFailures, sleep=${sleepTime}ms")
-                        }
-                        Thread.sleep(sleepTime)
-                        continue
-                    }
-                    
-                    // ✅ 成功获取 PCM 数据
-                    consecutiveFailures = 0
-                    frameCount++
-                    lastSuccessTime = System.currentTimeMillis() // 🔥 更新最后成功时间
-                    
-                    // 🔥 降低日志频率，避免影响性能
-                    if (frameCount % 100 == 0L) {
-//                        Log.d("AudioCapture", "📥 [Frame #$frameCount] Got PCM from source: size=${pcmData.size} bytes, ts=$timestampNs ns")
-//                        Log.d("AudioCapture", "   Sample rate: $audioSampleRate Hz, Channels: $audioChannelCount")
-                    }
-                    
-                    // 将 PCM 数据和时间戳输入到 MediaCodec 进行编码
-                    encodeAndSendAudioData(pcmData, timestampNs)
-                    
-                    // 🔥 关键修复：移除固定延迟，改用动态等待策略
-                    // 原因：75ms 延迟导致编码器输入输出不同步，造成数据堆积和损坏
-                    // 新策略：让编码器尽快处理数据，通过 RingBuffer 自然调节
-                    
-                } catch (e: InterruptedException) {
-                    // 线程中断，正常退出
-//                    Log.d("AudioCapture", "Audio capture thread interrupted")
-                    break
-                } catch (e: Exception) {
-                    if (isEncoding) {
-//                        Log.e(TAG, "Error reading external audio data: ${e.message}")
-                    }
-                    consecutiveFailures++
-                    Thread.sleep(5)
-                }
-                
-                // 🔥 关键修复：检测音频采集超时（超过 5 秒无数据），提示用户检查屏幕状态
-                val noDataDuration = System.currentTimeMillis() - lastSuccessTime
-                if (noDataDuration > 5000 && consecutiveFailures > 10) {
-//                    Log.e("AudioCapture", "❌ [CRITICAL] No audio data for ${noDataDuration}ms! MediaProjection audio may be paused by system.")
-//                    Log.e("AudioCapture", "   Please ensure: 1) Screen is ON, 2) App is in foreground")
-                    // 重置时间戳，避免重复打印
-                    lastSuccessTime = System.currentTimeMillis()
-                }
-            }
-            
-//            Log.d("AudioCapture", "External audio capture thread finished, total frames received: $frameCount, total failures: $consecutiveFailures")
-            
-        }, "SurfaceTextureEncoder-ExternalAudioThread")
-        
-        audioThread?.start()
-//        Log.d("AudioCapture", "✅ External audio capture thread started")
+        val data = if (size == pcmData.size) {
+            pcmData
+        } else {
+            pcmData.copyOf(size)
+        }
+        encodeAndSendAudioData(data, timestampNs)
     }
     
     /**
@@ -1168,21 +1046,7 @@ class SurfaceTextureEncoder(
      */
     private fun stopAudioRecorder() {
         isAudioRecording = false
-        val thread = audioThread
-        if (thread != null && thread != Thread.currentThread()) {
-            try {
-                thread.interrupt()
-                thread.join(1000)
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-            } catch (e: Exception) {
-//                Log.w(TAG, "Error stopping audio thread", e)
-            }
-        }
-        if (thread == null || thread == Thread.currentThread() || !thread.isAlive) {
-            audioThread = null
-        }
-        
+
         try {
             mediaCodecAudio?.stop()
             mediaCodecAudio?.release()

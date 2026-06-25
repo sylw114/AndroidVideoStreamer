@@ -97,11 +97,10 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
     }
     
     /**
-     * 设置外部音频源
+     * 提交外部 PCM 音频数据
      */
-    fun setExternalAudioSource(audioSource: (() -> Pair<ByteArray, Long>?)?) {
-        currentConfig = currentConfig.copy(externalAudioSource = audioSource)
-//        Log.d(TAG, "External audio source ${if (audioSource != null) "set" else "cleared"}")
+    fun submitExternalAudioData(pcmData: ByteArray, size: Int, timestampNs: Long) {
+        protocol?.submitExternalAudioData(pcmData, size, timestampNs)
     }
 
     /**
@@ -127,13 +126,8 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
             return
         }
         
-        // 构建完整配置
-        val config = currentConfig.copy(
-            externalAudioSource = currentConfig.externalAudioSource
-        )
-
 //        Log.d(TAG, "Starting streaming with protocol: ${protocol?.javaClass?.simpleName}")
-        protocol?.start(url, config)
+        protocol?.start(url, currentConfig)
     }
     
     /**

@@ -49,7 +49,6 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
                 audioSampleRate = config.audioSampleRate,
                 audioChannelCount = config.audioChannelCount,
                 audioBitrate = config.audioBitrate,
-                externalAudioSource = config.externalAudioSource,
                 onSurfaceReady
             ).apply {
 
@@ -136,6 +135,10 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
         } catch (e: Exception) {
 //            Log.e(TAG, "Error stopping RTMP streaming", e)
         }
+    }
+
+    override fun submitExternalAudioData(pcmData: ByteArray, size: Int, timestampNs: Long) {
+        encoder?.submitExternalAudioData(pcmData, size, timestampNs)
     }
 
     override fun cleanupAfterEncoderExit() {

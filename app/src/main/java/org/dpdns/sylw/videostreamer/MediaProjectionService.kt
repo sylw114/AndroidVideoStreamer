@@ -60,19 +60,12 @@ class MediaProjectionService : Service() {
 
     var config: AudioPlaybackCaptureConfiguration? = null
     
-    // 音频数据回调接口，用于将内录音频传递给编码器
-    var audioDataCallback: (() -> ByteArray?)? = null
+    // 音频数据回调接口，用于将内录音频直接提交给编码器
+    @Volatile
+    private var audioDataCallback: ((ByteArray, Int, Long) -> Unit)? = null
     
     // 🔥 全局变量：单个 PCM 包大小（由 AudioRecord.getMinBufferSize 计算得出）
     private var audioPacketSize: Int = 0
-    
-    // 🔥 环形缓冲区：8 包（约 5 帧 AAC，~270ms），每包大小由 audioPacketSize 决定
-    // 容量设计：理论最小 2 包，4 倍预留应对并发抖动（GC、线程调度等）
-    // 平衡点：足够应对常见卡顿，同时保持低延迟和快速响应
-    // ⚠️ 注意：audioRingBuffer 需要在 startAudioCapture 中初始化，因为 packetSize 依赖于 AudioRecord 配置
-    private lateinit var audioRingBuffer: LockFreeRingBuffer
-    // 复用读取缓冲区，减少 GC
-    private lateinit var readBuffer: ByteArray
     
     // 屏幕旋转回调，通知 StreamManager 更新编码器
     var onScreenRotation: ((Int, Int) -> Unit)? = null
@@ -156,25 +149,9 @@ class MediaProjectionService : Service() {
         // 🔥 停止服务（释放投影、音频等全部资源）
         fun stop() = this@MediaProjectionService.stopSelf()
 
-        // 提供给外部获取音频数据的接口 - 使用环形缓冲区
-        // 🔥 性能优化：提供直接读取到目标缓冲区的方法，避免 copyOf
-        fun getAudioDataInto(targetBuffer: ByteArray, outTimestamp: LongArray? = null): Int {
-            return audioRingBuffer.read(targetBuffer, outTimestamp)
-        }
-            
-        // 🔥 性能优化：使用对象池减少 ByteArray 分配
-        private val audioDataPool = ArrayDeque<ByteArray>(4).apply {
-            repeat(4) { addLast(ByteArray(audioPacketSize.takeIf { it > 0 } ?: 15360)) }
-        }
-            
-        // 🔥 回收音频数据缓冲区到对象池
-        fun recycleAudioData(buffer: ByteArray) {
-            synchronized(audioDataPool) {
-                val expectedSize = audioPacketSize.takeIf { it > 0 } ?: 15360
-                if (audioDataPool.size < 4 && buffer.size >= expectedSize) {
-                    audioDataPool.addLast(buffer)
-                }
-            }
+        // 设置内录 PCM 数据回调，由采集线程直接提交给编码器
+        fun setAudioDataCallback(callback: ((ByteArray, Int, Long) -> Unit)?) {
+            this@MediaProjectionService.audioDataCallback = callback
         }
     }
 
@@ -471,10 +448,6 @@ class MediaProjectionService : Service() {
 //        android.util.Log.d("AudioCapture", "📊 Audio config: ${currentSampleRate}Hz, ${if(currentChannelConfig == AudioFormat.CHANNEL_IN_STEREO) "stereo" else "mono"}, 16-bit")
 //        android.util.Log.d("AudioCapture", "   Min buffer: $minBufferSize, Using buffer: $audioPacketSize bytes")
         
-        // 🔥 初始化环形缓冲区和读取缓冲区（使用全局的 audioPacketSize）
-        audioRingBuffer = LockFreeRingBuffer(capacity = 16, packetSize = audioPacketSize)
-        readBuffer = ByteArray(audioPacketSize)
-
         try {
             audioRecord = AudioRecord.Builder()
                 .setAudioFormat(
@@ -544,10 +517,7 @@ class MediaProjectionService : Service() {
 //                                    System.nanoTime() // Fallback：使用系统时间
 //                                }
                                 
-                                val success = audioRingBuffer.write(data, read, timestampNs)
-                                if (!success && (readCount <= 3 || readCount % 100 == 0)) {
-//                                    android.util.Log.w("AudioCapture", "⚠️ Ring buffer FULL")
-                                }
+                                audioDataCallback?.invoke(data, read, timestampNs)
                             }
                             read == 0 -> {
                                 emptyReadCount++
@@ -586,15 +556,6 @@ class MediaProjectionService : Service() {
         audioRecord?.stop()
         audioRecord?.release()
         audioRecord = null
-        
-        // 🔥 关键修复：清空音频环形缓冲区，防止旧数据累积导致音画不同步
-        if (::audioRingBuffer.isInitialized) {
-            audioRingBuffer.clear()
-//            android.util.Log.d("AudioCapture", "🔍 Audio ring buffer cleared")
-        }
-        
-        // 🔥 重置初始化状态（下次 startAudioCapture 会重新初始化）
-        // 注意：lateinit var 不能设置为 null，只能通过重新赋值来重置
     }
     
     /**

@@ -293,23 +293,11 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             }
 //            android.util.Log.d("VideoWindow", "Screen rotation callback registered in Service")
 
-            // 3. 设置外部 PCM 音频源（从 MediaProjectionService 获取）
-            // 🔥 性能优化：使用 getAudioDataInto() + 预分配缓冲区，减少 GC
-            // 🔥 关键修复：返回 Pair<ByteArray, Long>，包含 PCM 数据和采集时间戳
-            // 🔥 关键修复：使用动态的 audioPacketSize，避免硬编码
-            val audioPacketSize = binder.getAudioPacketSize().takeIf { it > 0 } ?: 15360
-            val pcmReadBuffer = ByteArray(audioPacketSize) // 预分配缓冲区
-            val timestampArray = LongArray(1) // 🔥 用于接收时间戳
-            streamManager?.setExternalAudioSource {
-                val readSize = binder.getAudioDataInto(pcmReadBuffer, timestampArray)
-                if (readSize > 0) {
-                    val timestampNs = timestampArray[0]
-                    Pair(pcmReadBuffer.copyOf(readSize), timestampNs)
-                } else {
-                    null
-                }
+            // 3. 设置外部 PCM 音频接收端（从 MediaProjectionService 直接提交给编码器）
+            binder.setAudioDataCallback { pcmData, size, timestampNs ->
+                streamManager?.submitExternalAudioData(pcmData, size, timestampNs)
             }
-//            android.util.Log.d("AudioCapture", "External audio source set from MediaProjectionService (with timestamp)")
+//            android.util.Log.d("AudioCapture", "External audio sink set from MediaProjectionService (with timestamp)")
 
             // 5. 注入音频采集回调（协议层自动管理音频生命周期）
             streamManager?.setAudioCaptureCallbacks(

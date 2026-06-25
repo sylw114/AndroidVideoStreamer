@@ -57,6 +57,11 @@ interface IStreamingProtocol {
     fun updateFrameRate(frameRate: Int)
 
     /**
+     * 提交外部 PCM 音频数据
+     */
+    fun submitExternalAudioData(pcmData: ByteArray, size: Int, timestampNs: Long)
+
+    /**
      * 获取当前推流地址
      */
     fun getCurrentUrl(): String?
@@ -115,5 +120,4 @@ data class StreamingConfig(
     val audioSampleRate: Int = 48000,
     val audioChannelCount: Int = 2,
     val audioBitrate: Int = 128_000,   // 128 kbps
-    val externalAudioSource: (() -> Pair<ByteArray, Long>?)? = null,  // 🔥 返回 PCM 数据和采集时间戳
 )
