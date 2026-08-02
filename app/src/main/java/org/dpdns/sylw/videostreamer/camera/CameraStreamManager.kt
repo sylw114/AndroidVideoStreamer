@@ -16,7 +16,19 @@ import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.os.Handler
 import android.os.Looper
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.MeteringPoint
+import androidx.camera.core.Preview
+import androidx.camera.core.SurfaceRequest
+import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import java.util.concurrent.TimeUnit
 import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.StreamConfig
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
@@ -51,6 +63,17 @@ class CameraStreamManager(private val context: Context) {
 
     // 当前选中的摄像头配置（用于 CaptureRequest / 高速模式判断）
     private var cameraConfig: CameraConfig? = null
+
+    // 🔥 CameraX 相关（普通模式 ≤60fps）
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var cameraX: Camera? = null
+    private var displayPreview: Preview? = null
+    private var encoderPreview: Preview? = null
+    private var previewSurfaceProvider: Preview.SurfaceProvider? = null
+    private var lifecycleActivity: Activity? = null
+
+    // 🔥 高速模式软件 AE（≥120fps，Camera2 路径）
+    private var softwareAe: HighSpeedSoftwareAe? = null
 
     // 状态回调
     var onCameraReady: ((Boolean) -> Unit)? = null
@@ -228,6 +251,121 @@ class CameraStreamManager(private val context: Context) {
     }
 
     /**
+     * CameraX 绑定（普通模式 ≤60fps）
+     *
+     * 绑定两个 Preview 用例：
+     * 1. 编码器 Preview：通过自定义 SurfaceProvider 把编码器输入 Surface 提供给 CameraX
+     * 2. 显示 Preview（可选）：绑定 UI 的 PreviewView SurfaceProvider（预览 + 点击对焦）
+     * 60fps 通过 Camera2Interop 设置 CONTROL_AE_TARGET_FPS_RANGE。
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    @SuppressLint("MissingPermission")
+    private fun bindCameraX(config: CameraConfig, targetSurface: Surface) {
+        val lifecycleOwner = lifecycleActivity as? LifecycleOwner
+        if (lifecycleOwner == null) {
+            Log.e(TAG, "Activity 未实现 LifecycleOwner，无法绑定 CameraX")
+            onError?.invoke("Activity 未实现 LifecycleOwner")
+            return
+        }
+
+        // ProcessCameraProvider.getInstance() 可能阻塞，在调用线程（IO）获取
+        val provider = try {
+            ProcessCameraProvider.getInstance(context).get()
+        } catch (e: Exception) {
+            Log.e(TAG, "获取 CameraProvider 失败", e)
+            onError?.invoke("CameraX 初始化失败: ${e.message}")
+            return
+        }
+        cameraProvider = provider
+
+        // CameraX 的绑定操作必须在主线程执行
+        mainHandler.post {
+            try {
+                provider.unbindAll()
+
+                val isFront = try {
+                    cameraManager?.getCameraCharacteristics(config.cameraId)
+                        ?.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT
+                } catch (e: Exception) {
+                    false
+                }
+                val cameraSelector =
+                    if (isFront) CameraSelector.DEFAULT_FRONT_CAMERA else CameraSelector.DEFAULT_BACK_CAMERA
+
+                // 1. 编码器 Preview：帧直接输出到编码器输入 Surface
+                val encoderBuilder = Preview.Builder()
+                    .setTargetResolution(Size(config.width, config.height))
+                Camera2Interop.Extender(encoderBuilder)
+                    .setCaptureRequestOption(
+                        CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                        Range(config.minFrameRateForSelected, config.frameRate)
+                    )
+                val encoderPreview = encoderBuilder.build()
+                encoderPreview.setSurfaceProvider(object : Preview.SurfaceProvider {
+                    override fun onSurfaceRequested(request: SurfaceRequest) {
+                        request.provideSurface(targetSurface, ContextCompat.getMainExecutor(context)) { result ->
+                            if (result.resultCode != SurfaceRequest.Result.RESULT_SURFACE_USED_SUCCESSFULLY) {
+                                Log.w(TAG, "编码器 Surface 未成功使用: ${result.resultCode}")
+                            }
+                        }
+                    }
+                })
+                this.encoderPreview = encoderPreview
+
+                // 2. 显示 Preview：绑定 UI 传入的 PreviewView SurfaceProvider
+                val useCases = mutableListOf<androidx.camera.core.UseCase>(encoderPreview)
+                val displayProvider = previewSurfaceProvider
+                if (displayProvider != null) {
+                    val displayBuilder = Preview.Builder()
+                        .setTargetResolution(Size(config.width, config.height))
+                    Camera2Interop.Extender(displayBuilder)
+                        .setCaptureRequestOption(
+                            CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                            Range(config.minFrameRateForSelected, config.frameRate)
+                        )
+                    val displayPreview = displayBuilder.build()
+                    displayPreview.setSurfaceProvider(displayProvider)
+                    this.displayPreview = displayPreview
+                    useCases.add(displayPreview)
+                }
+
+                cameraX = provider.bindToLifecycle(lifecycleOwner, cameraSelector, *useCases.toTypedArray())
+                isCameraReady = true
+                onCameraReady?.invoke(true)
+                Log.d(TAG, "CameraX 绑定成功, useCases=${useCases.size}")
+            } catch (e: Exception) {
+                Log.e(TAG, "CameraX 绑定失败", e)
+                onError?.invoke("CameraX 绑定失败: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * 设置预览 SurfaceProvider（UI 层把 PreviewView 的 SurfaceProvider 传入）
+     */
+    fun setPreviewSurfaceProvider(provider: Preview.SurfaceProvider?) {
+        previewSurfaceProvider = provider
+        // 若显示预览已绑定，实时更新
+        displayPreview?.setSurfaceProvider(provider)
+    }
+
+    /**
+     * 手动对焦 + 测光（点击预览区域触发）
+     *
+     * @param meteringPoint 由 UI 层通过 PreviewView.meteringPointFactory.createPoint(x, y) 生成
+     */
+    fun focusAt(meteringPoint: MeteringPoint) {
+        val camera = cameraX ?: return
+        val action = FocusMeteringAction.Builder(
+            meteringPoint,
+            FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+        )
+            .setAutoCancelDuration(3, TimeUnit.SECONDS)
+            .build()
+        camera.cameraControl.startFocusAndMetering(action)
+    }
+
+    /**
      * 打开摄像头（仅打开 Camera2 设备，不创建编码器，也不创建 CaptureSession）
      */
     // 保存最近一次传给 openCamera 的 Surface，用于降级重试
@@ -239,6 +377,12 @@ class CameraStreamManager(private val context: Context) {
 
         cameraConfig = config
         lastTargetSurface = targetSurface
+
+        // 普通模式（≤60fps）走 CameraX；高速模式（≥120fps）走 Camera2
+        if (!config.isHighSpeed) {
+            bindCameraX(config, targetSurface)
+            return
+        }
 
         // 若已有残留的 camera 资源（异常路径），先关闭
         if (cameraDevice != null) {
@@ -338,13 +482,43 @@ class CameraStreamManager(private val context: Context) {
                 return
             }
 
+            // 高速模式：附加软件 AE 亮度采样流（ImageReader）
+            val outputs = mutableListOf(OutputConfiguration(targetSurface))
+            if (config.isHighSpeed) {
+                softwareAe?.close()
+                softwareAe = null
+                val ae = tryCreateSoftwareAe(config)
+                if (ae != null) {
+                    softwareAe = ae
+                    outputs.add(OutputConfiguration(ae.surface))
+                }
+            }
+
             val sessionConfig = SessionConfiguration(
                 if(!config.isHighSpeed)SessionConfiguration.SESSION_REGULAR else SessionConfiguration.SESSION_HIGH_SPEED,
-                listOf(OutputConfiguration(targetSurface)),
+                outputs,
                 ContextCompat.getMainExecutor(context),
                 callback
             )
-            camera.createCaptureSession(sessionConfig)
+            try {
+                camera.createCaptureSession(sessionConfig)
+            } catch (e: Exception) {
+                // 若高速会话不接受 ImageReader（个别设备限制），降级为仅编码器输出
+                if (softwareAe != null) {
+                    Log.w(TAG, "高速会话不接受 ImageReader，降级为无软件 AE", e)
+                    softwareAe?.close()
+                    softwareAe = null
+                    val fallbackConfig = SessionConfiguration(
+                        SessionConfiguration.SESSION_HIGH_SPEED,
+                        listOf(OutputConfiguration(targetSurface)),
+                        ContextCompat.getMainExecutor(context),
+                        callback
+                    )
+                    camera.createCaptureSession(fallbackConfig)
+                } else {
+                    throw e
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create camera capture session", e)
             onError?.invoke("创建摄像头会话失败: ${e.message}")
@@ -391,6 +565,12 @@ class CameraStreamManager(private val context: Context) {
 
             captureRequestBuilder.addTarget(targetSurface)
 
+            // 高速模式：附加软件 AE 采样流
+            val ae = softwareAe
+            if (ae != null) {
+                captureRequestBuilder.addTarget(ae.surface)
+            }
+
             captureRequestBuilder.set(
                 CaptureRequest.CONTROL_AF_MODE,
                 CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
@@ -400,11 +580,23 @@ class CameraStreamManager(private val context: Context) {
                 CaptureRequest.CONTROL_AE_MODE_ON
             )
 
-            // 使用存储的最小帧率作为 AE 范围下界，确保设备可以在该范围内调节（例如 15-30fps）
-            captureRequestBuilder.set(
-                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                Range(config.minFrameRateForSelected, config.frameRate)
-            )
+            if (config.isHighSpeed && ae != null) {
+                // 高速会话存在第二个输出（软件 AE 采样流）时，帧率范围必须固定（min == max）
+                captureRequestBuilder.set(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    Range(config.frameRate, config.frameRate)
+                )
+                captureRequestBuilder.set(
+                    CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                    ae.currentCompensation
+                )
+            } else {
+                // 使用存储的最小帧率作为 AE 范围下界，确保设备可以在该范围内调节（例如 15-30fps）
+                captureRequestBuilder.set(
+                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
+                    Range(config.minFrameRateForSelected, config.frameRate)
+                )
+            }
 
             val request = captureRequestBuilder.build()
 
@@ -433,6 +625,60 @@ class CameraStreamManager(private val context: Context) {
             }
 
             onError?.invoke("启动预览失败: ${e.message}")
+        }
+    }
+
+    /**
+     * 尝试创建高速模式软件 AE 亮度采样流
+     *
+     * 仅当设备支持曝光补偿（CONTROL_AE_COMPENSATION_RANGE 非 [0,0]）时创建，
+     * 否则返回 null（维持原行为）。
+     */
+    private fun tryCreateSoftwareAe(config: CameraConfig): HighSpeedSoftwareAe? {
+        return try {
+            val characteristics = cameraManager?.getCameraCharacteristics(config.cameraId)
+            val compRange = characteristics?.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+            if (compRange == null || (compRange.lower == 0 && compRange.upper == 0)) {
+                Log.w(TAG, "设备不支持曝光补偿，软件 AE 不可用")
+                return null
+            }
+            HighSpeedSoftwareAe(
+                width = config.width,
+                height = config.height,
+                compensationRange = compRange,
+                onExposureChanged = { compensation ->
+                    updateHighSpeedExposure(compensation)
+                }
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "创建软件 AE 失败", e)
+            null
+        }
+    }
+
+    /**
+     * 高速模式：应用新的曝光补偿并重新提交高速请求列表
+     */
+    private fun updateHighSpeedExposure(compensation: Int) {
+        val config = cameraConfig ?: return
+        val device = cameraDevice ?: return
+        val session = captureSession ?: return
+        val ae = softwareAe ?: return
+        val targetSurface = lastTargetSurface ?: return
+        if (session !is CameraConstrainedHighSpeedCaptureSession) return
+
+        try {
+            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+            builder.addTarget(targetSurface)
+            builder.addTarget(ae.surface)
+            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(config.frameRate, config.frameRate))
+            builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, compensation)
+            val requestList = session.createHighSpeedRequestList(builder.build())
+            session.setRepeatingBurst(requestList, null, null)
+        } catch (e: Exception) {
+            Log.w(TAG, "更新高速曝光补偿失败", e)
         }
     }
 
@@ -501,9 +747,15 @@ class CameraStreamManager(private val context: Context) {
 
         // 重置降级标记，每次新推流都允许先尝试高速模式
         hasAttemptedFallback = false
+        lifecycleActivity = activity
 
         fun onSurfaceReady(surface: Surface) {
-            openCamera(cameraConfig, surface)
+            // 普通模式（≤60fps）走 CameraX；高速模式（≥120fps）走 Camera2
+            if (cameraConfig.isHighSpeed) {
+                openCamera(cameraConfig, surface)
+            } else {
+                bindCameraX(cameraConfig, surface)
+            }
         }
         streamManager = StreamManager(activity, {
             onSurfaceReady(it)
@@ -595,6 +847,25 @@ class CameraStreamManager(private val context: Context) {
      */
     private fun releaseCameraResources(closeCaptureSession: Boolean = true) {
         Log.d(TAG, "Releasing camera resources...")
+
+        // 解绑 CameraX（普通模式）
+        try {
+            cameraProvider?.unbindAll()
+        } catch (e: Exception) {
+            Log.w(TAG, "Ignored exception while unbinding CameraX", e)
+        }
+        cameraProvider = null
+        cameraX = null
+        displayPreview = null
+        encoderPreview = null
+
+        // 关闭软件 AE（高速模式）
+        try {
+            softwareAe?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Ignored exception while closing software AE", e)
+        }
+        softwareAe = null
 
         // Closing a CameraCaptureSession may internally call stopRepeating() which can
         // throw CameraAccessException (CAMERA_ERROR) if the device is already in an

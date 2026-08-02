@@ -6,18 +6,22 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
@@ -80,6 +84,9 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     var blackScreenJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
 
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    // 🔥 预览视图（CameraX PreviewView，用于预览 + 点击对焦）
+    var previewView by remember { mutableStateOf<PreviewView?>(null) }
     
     // 权限请求
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -232,6 +239,14 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         videoMode = StreamConfig.getRateMode()!!
         videoQuality = StreamConfig.getCqQuality()!!
     }
+
+    // 🔥 预览 SurfaceProvider 绑定到 Camera 管理器（普通模式 CameraX 显示预览需要）
+    // 双 key：previewView 与 cameraManager 任一初始化完成后都重新绑定
+    LaunchedEffect(previewView, cameraManager) {
+        previewView?.let { view ->
+            cameraManager?.setPreviewSurfaceProvider(view.surfaceProvider)
+        }
+    }
     
     // 当摄像头切换时，更新默认帧率和分辨率
     LaunchedEffect(selectedCameraId) {
@@ -280,6 +295,31 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         modifier = modifier
             .fillMaxSize()
     ) {
+        // 🔥 预览视图（CameraX PreviewView，点击区域手动对焦 + 测光）
+        AndroidView(
+            factory = { ctx ->
+                PreviewView(ctx).apply {
+                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                }
+            },
+            update = { view ->
+                previewView = view
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures { offset ->
+                        // 点击预览区域 → 手动对焦 + 测光（仅推流中摄像头已打开时有意义）
+                        val view = previewView
+                        val manager = cameraManager
+                        if (view != null && manager != null) {
+                            val point = view.meteringPointFactory.createPoint(offset.x, offset.y)
+                            manager.focusAt(point)
+                        }
+                    }
+                }
+        )
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
