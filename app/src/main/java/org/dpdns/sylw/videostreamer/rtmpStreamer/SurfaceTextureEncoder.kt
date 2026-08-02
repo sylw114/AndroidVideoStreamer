@@ -37,6 +37,8 @@ class SurfaceTextureEncoder(
         private const val TAG = "SurfaceTextureEncoder"
         private const val VIDEO_MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
         private const val AUDIO_MIME_TYPE = MediaFormat.MIMETYPE_AUDIO_AAC
+        // H.264 规范的单边最大尺寸，能力表粗筛时使用（超出必不支持）
+        private const val MAX_FRAME_DIMENSION = 4096
 
         /**
          * 根据分辨率×帧率计算 H.264 的最小 AVC Level
@@ -70,6 +72,8 @@ class SurfaceTextureEncoder(
     private var videoBufferInfo: MediaCodec.BufferInfo? = null
     private var effectiveVideoFrameRate: Int = frameRate
     private var selectedVideoEncoderName: String? = null
+    // 按优先级排序的视频编码器候选列表（硬件优先、帧率降序），initVideoEncoder 逐个尝试
+    private var videoEncoderCandidates: List<VideoEncoderChoice>? = null
     
     // 音频编码相关
     private var mediaCodecAudio: MediaCodec? = null
@@ -218,9 +222,15 @@ class SurfaceTextureEncoder(
     fun start(rtmpUrl: String) {
         try {
 //            Log.d(TAG, "Starting encoder: ${width}x${height}, bitrate=$videoBitrate, fps=$frameRate")
-            val encoderChoice = selectVideoEncoder(width, height, frameRate)
-            selectedVideoEncoderName = encoderChoice.codecName
-            effectiveVideoFrameRate = encoderChoice.frameRate
+            val encoderChoices = selectVideoEncoder(width, height, frameRate)
+            if (encoderChoices.isEmpty()) {
+                throw IllegalStateException("当前设备没有可用于 ${width}x${height} 的 H.264 视频编码器")
+            }
+            // 保存完整候选列表，initVideoEncoder 会逐个尝试（configure 失败切下一个候选）
+            videoEncoderCandidates = encoderChoices
+            val bestChoice = encoderChoices.first()
+            selectedVideoEncoderName = bestChoice.codecName
+            effectiveVideoFrameRate = bestChoice.frameRate
             if (effectiveVideoFrameRate < frameRate) {
                 onInfo?.invoke("当前分辨率不支持 ${frameRate}fps 编码，已自动降级为 ${effectiveVideoFrameRate}fps")
             }
@@ -330,6 +340,7 @@ class SurfaceTextureEncoder(
             cachedAVCCConfig = null
             cachedAudioSpecificConfig = null
             selectedVideoEncoderName = null
+            videoEncoderCandidates = null
             effectiveVideoFrameRate = frameRate
             spsPpsSent = false
             initialVideoPtsUs = -1L
@@ -360,94 +371,116 @@ class SurfaceTextureEncoder(
     }
     
     /**
-     * 初始化视频编码器
+     * 初始化视频编码器：按候选列表逐个尝试，configure/start 失败自动切下一个候选。
+     *
+     * 能力表在真机上不可靠：可能误报"不支持"（导致可用编码器被跳过），
+     * 也可能 configure 成功但实际跑不起来。运行时验证才是最可靠的判定，
+     * 只有全部候选都失败才抛出异常，交由上层降级/报错。
      */
     private fun initVideoEncoder() {
-        try {
-//            Log.d(TAG, "Initializing video encoder...")
-            val encoderName = selectedVideoEncoderName
-                ?: selectVideoEncoder(width, height, frameRate).also {
-                    selectedVideoEncoderName = it.codecName
-                    effectiveVideoFrameRate = it.frameRate
-                }.codecName
-            
-            // 创建 MediaFormat
-            val format = MediaFormat.createVideoFormat(VIDEO_MIME_TYPE, width, height).apply {
-                setInteger(MediaFormat.KEY_BIT_RATE, videoBitrate)
-                setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, effectiveVideoFrameRate.toFloat())
-                setInteger(MediaFormat.KEY_FRAME_RATE, effectiveVideoFrameRate)
-                setInteger(MediaFormat.KEY_COLOR_FORMAT, 
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
-                setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
-                // 根据帧率+分辨率自动选择最小需要的 AVC Level，移掉硬编码的 Level 4 限制
-                // 1080p@120 → Level 5.1 | 4K@60 → Level 5.2 | 1080p@60 → Level 4.2
-                setInteger(MediaFormat.KEY_LEVEL, computeMinAvcLevel(width, height, effectiveVideoFrameRate))
-                setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-                if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-                    setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
-                setInteger(MediaFormat.KEY_OPERATING_RATE, effectiveVideoFrameRate)
-                
-                if (videoMode == "CBR") {
-                    setInteger(MediaFormat.KEY_COMPLEXITY, 0)
-                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-                } else {
-                    setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ)
-                    setInteger(MediaFormat.KEY_QUALITY, videoQuality)
+        val announcedFps = effectiveVideoFrameRate
+        val choices = videoEncoderCandidates
+            ?: selectedVideoEncoderName?.let { listOf(VideoEncoderChoice(it, effectiveVideoFrameRate)) }
+            ?: selectVideoEncoder(width, height, frameRate)
+        if (choices.isEmpty()) {
+            throw IllegalStateException("当前设备没有可用于 ${width}x${height} 的 H.264 视频编码器")
+        }
+
+        var lastError: Exception? = null
+        for (choice in choices) {
+            try {
+                tryInitVideoEncoder(choice.codecName, choice.frameRate)
+                // 初始化成功：记录实际使用的编码器和帧率
+                selectedVideoEncoderName = choice.codecName
+                effectiveVideoFrameRate = choice.frameRate
+                if (effectiveVideoFrameRate < announcedFps) {
+                    onInfo?.invoke("视频编码器降级：实际使用 ${effectiveVideoFrameRate}fps")
                 }
+                return
+            } catch (e: Exception) {
+                lastError = e
+//                Log.w(TAG, "视频编码器 ${choice.codecName} 初始化失败（${e.message}），尝试下一个候选")
+                releaseVideoEncoder()
             }
+        }
+
+        throw lastError ?: IllegalStateException("当前设备没有可用于 ${width}x${height} 的 H.264 视频编码器")
+    }
+
+    /**
+     * 用指定编码器完成一次视频编码初始化（创建 + configure + 启动 + 提取 SPS/PPS）
+     */
+    private fun tryInitVideoEncoder(encoderName: String, fps: Int) {
+        // 创建 MediaFormat
+        val format = MediaFormat.createVideoFormat(VIDEO_MIME_TYPE, width, height).apply {
+            setInteger(MediaFormat.KEY_BIT_RATE, videoBitrate)
+            setFloat(MediaFormat.KEY_MAX_FPS_TO_ENCODER, fps.toFloat())
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_COLOR_FORMAT, 
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
+            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+            // 根据帧率+分辨率自动选择最小需要的 AVC Level，移掉硬编码的 Level 4 限制
+            // 1080p@120 → Level 5.1 | 4K@60 → Level 5.2 | 1080p@60 → Level 4.2
+            setInteger(MediaFormat.KEY_LEVEL, computeMinAvcLevel(width, height, fps))
+            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
+                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
             
-//            Log.d(TAG, "Creating encoder with format: $format")
-            
-            // 创建编码器
-            mediaCodecVideo = MediaCodec.createByCodecName(encoderName).apply {
-                configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-                surface = this@apply.createInputSurface()
-                start()
-                
-//                Log.d(TAG, "MediaCodec started, will get SPS/PPS from codec config buffer and/or output format")
-                
-                // 某些编码器会在 start 后更新 outputFormat 包含 csd-0/csd-1
-                // 我们先保存这个 format，稍后可能需要用它补充缺失的 PPS
-                val actualFormat = this.outputFormat
-//                Log.d(TAG, "Output format: ${actualFormat.toString()}")
-                
-                // 检查是否有 csd-0 和 csd-1
-                val spsBuffer = actualFormat.getByteBuffer("csd-0")
-                val ppsBuffer = actualFormat.getByteBuffer("csd-1")
-                
-                if (spsBuffer != null && ppsBuffer != null) {
-                    val sps = ByteArray(spsBuffer.remaining())
-                    spsBuffer.get(sps)
-                    val pps = ByteArray(ppsBuffer.remaining())
-                    ppsBuffer.get(pps)
-                    
-//                    Log.d(TAG, "Found SPS in output format, size=${sps.size}")
-//                    Log.d(TAG, "Found PPS in output format, size=${pps.size}")
-                    
-                    // 去除起始码
-                    val strippedSps = stripStartCode(sps)
-                    val strippedPps = stripStartCode(pps)
-                    
-//                    Log.d(TAG, "SPS: ${sps.size} bytes -> ${strippedSps.size} bytes (after stripping start code)")
-//                    Log.d(TAG, "PPS: ${pps.size} bytes -> ${strippedPps.size} bytes (after stripping start code)")
-                    
-                    // 立即合并成完整的 AVCDecoderConfigurationRecord（使用去除起始码的数据）
-                    val avccConfig = mergeSpsPpsToAVCC(strippedSps, strippedPps)
-//                    Log.d(TAG, "Merged AVCC config size=${avccConfig.size}, preview: ${avccConfig.take(20).joinToString(" ") { "%02X".format(it) }}")
-                    
-                    // 保存到字段，等待 codec config flag 时再发送（双保险）
-                    cachedAVCCConfig = avccConfig
-                } else {
-//                    Log.w(TAG, "Incomplete SPS/PPS in output format, will wait for codec config buffer")
-                }
+            if (videoMode == "CBR") {
+                setInteger(MediaFormat.KEY_COMPLEXITY, 0)
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            } else {
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ)
+                setInteger(MediaFormat.KEY_QUALITY, videoQuality)
             }
+        }
+        
+//        Log.d(TAG, "Creating encoder with format: $format")
+        
+        // 创建编码器
+        mediaCodecVideo = MediaCodec.createByCodecName(encoderName).apply {
+            configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            surface = this@apply.createInputSurface()
+            start()
             
-//            Log.d(TAG, "Video encoder initialized: ${width}x${height}, bitrate=$videoBitrate")
+//            Log.d(TAG, "MediaCodec started, will get SPS/PPS from codec config buffer and/or output format")
             
-        } catch (e: Exception) {
-//            Log.e(TAG, "Failed to initialize video encoder", e)
-            throw e
+            // 某些编码器会在 start 后更新 outputFormat 包含 csd-0/csd-1
+            // 我们先保存这个 format，稍后可能需要用它补充缺失的 PPS
+            val actualFormat = this.outputFormat
+//            Log.d(TAG, "Output format: ${actualFormat.toString()}")
+            
+            // 检查是否有 csd-0 和 csd-1
+            val spsBuffer = actualFormat.getByteBuffer("csd-0")
+            val ppsBuffer = actualFormat.getByteBuffer("csd-1")
+            
+            if (spsBuffer != null && ppsBuffer != null) {
+                val sps = ByteArray(spsBuffer.remaining())
+                spsBuffer.get(sps)
+                val pps = ByteArray(ppsBuffer.remaining())
+                ppsBuffer.get(pps)
+                
+//                Log.d(TAG, "Found SPS in output format, size=${sps.size}")
+//                Log.d(TAG, "Found PPS in output format, size=${pps.size}")
+                
+                // 去除起始码
+                val strippedSps = stripStartCode(sps)
+                val strippedPps = stripStartCode(pps)
+                
+//                Log.d(TAG, "SPS: ${sps.size} bytes -> ${strippedSps.size} bytes (after stripping start code)")
+//                Log.d(TAG, "PPS: ${pps.size} bytes -> ${strippedPps.size} bytes (after stripping start code)")
+                
+                // 立即合并成完整的 AVCDecoderConfigurationRecord（使用去除起始码的数据）
+                val avccConfig = mergeSpsPpsToAVCC(strippedSps, strippedPps)
+//                Log.d(TAG, "Merged AVCC config size=${avccConfig.size}, preview: ${avccConfig.take(20).joinToString(" ") { "%02X".format(it) }}")
+                
+                // 保存到字段，等待 codec config flag 时再发送（双保险）
+                cachedAVCCConfig = avccConfig
+            } else {
+//                Log.w(TAG, "Incomplete SPS/PPS in output format, will wait for codec config buffer")
+            }
         }
     }
     
@@ -668,18 +701,15 @@ class SurfaceTextureEncoder(
             return CapabilityQuerySize(alignedWidth, alignedHeight, isExactSupported = true)
         }
 
-        // 部分厂商的 H.264 能力表会拒绝高瘦竖屏尺寸，但 Surface 编码实际只受最大像素/宏块能力约束。
+        // 真机实测表明能力表并不可靠：部分厂商会误报竖屏/大尺寸（如 Nokia 1 上报上限 176x132 却能正常编码 720p），
+        // 也有反向误报（configure 成功但实际跑不起来）。因此这里只做"明显越界"的粗筛，
+        // 只要尺寸落在 H.264 规范上限（≤4096）且不低于能力表下限，就作为候选交给运行时验证
+        // （initVideoEncoder 逐个尝试 + 编码循环无输出看门狗兜底），不再用能力表的每边上限硬卡。
         val widthRange = videoCapabilities.supportedWidths
         val heightRange = videoCapabilities.supportedHeights
-        val maxArea = maxOf(
-            widthRange.upper.toLong() * heightRange.upper.toLong(),
-            heightRange.upper.toLong() * widthRange.upper.toLong()
-        )
-        val requestedArea = alignedWidth.toLong() * alignedHeight.toLong()
         return if (
-            alignedWidth <= maxOf(widthRange.upper, heightRange.upper) &&
-            alignedHeight <= maxOf(widthRange.upper, heightRange.upper) &&
-            requestedArea <= maxArea
+            alignedWidth >= widthRange.lower && alignedHeight >= heightRange.lower &&
+            alignedWidth <= MAX_FRAME_DIMENSION && alignedHeight <= MAX_FRAME_DIMENSION
         ) {
             CapabilityQuerySize(alignedWidth, alignedHeight, isExactSupported = false)
         } else null
@@ -687,13 +717,17 @@ class SurfaceTextureEncoder(
 
     /**
      * 高帧率必须先按编码器能力协商，否则部分硬件会在 dequeueOutputBuffer 时直接进入错误态。
+     *
+     * 返回按优先级排序的候选编码器列表（硬件优先、帧率降序）。
+     * 真机实测能力表并不可靠，这里不再做"是否支持"的硬性判定，
+     * 最终由 initVideoEncoder 逐个尝试（configure 失败切下一个候选）和编码循环看门狗兜底。
      */
-    private fun selectVideoEncoder(width: Int, height: Int, requestedFps: Int): VideoEncoderChoice {
+    private fun selectVideoEncoder(width: Int, height: Int, requestedFps: Int): List<VideoEncoderChoice> {
         val codecList = MediaCodecList(MediaCodecList.REGULAR_CODECS)
         val codecInfos = codecList.codecInfos.sortedWith(compareBy<MediaCodecInfo> {
             if (it.isSoftwareOnly) 1 else 0
         }.thenBy { it.name })
-        var fallback: VideoEncoderChoice? = null
+        val choices = mutableListOf<VideoEncoderChoice>()
 
         for (codecInfo in codecInfos) {
             if (!codecInfo.isEncoder) continue
@@ -714,17 +748,17 @@ class SurfaceTextureEncoder(
                     }.getOrDefault(30).coerceAtLeast(1)
                 }
             } else {
+                // 粗筛通过的尺寸能力表没有精确数据，先按全局帧率上界估算，运行时不达标由看门狗兜底
                 runCatching {
                     videoCapabilities.supportedFrameRates.upper
                 }.getOrDefault(30).coerceAtLeast(1)
             }
 
-            val choice = VideoEncoderChoice(codecInfo.name, supportedFps.coerceAtMost(requestedFps))
-            if (choice.frameRate >= requestedFps) return choice
-            if (fallback == null || choice.frameRate > fallback.frameRate) fallback = choice
+            choices += VideoEncoderChoice(codecInfo.name, supportedFps.coerceIn(1, requestedFps))
         }
 
-        return fallback ?: throw IllegalStateException("当前设备没有可用于 ${width}x${height} 的 H.264 视频编码器")
+        // 稳定排序：帧率降序，帧率相同时保持原有顺序（硬件在前、软件在后）
+        return choices.sortedWith(compareByDescending<VideoEncoderChoice> { it.frameRate })
     }
     
     /**
@@ -741,6 +775,12 @@ class SurfaceTextureEncoder(
         videoBufferInfo = MediaCodec.BufferInfo()
         var consecutiveErrors = 0
         val maxConsecutiveErrors = 10
+        // 无输出看门狗：某些设备 configure 成功但实际不支持该尺寸（如 2560x720 对 max 1920x1080 的编码器），
+        // 表现是 dequeue 永远不返回有效数据，既不报错也不产出，流会"假推流"挂死。
+        // 启动后若长时间没有任何输出（format 变化或编码数据），判定编码器实际不可用并快速失败。
+        val watchdogStartNs = System.nanoTime()
+        var sawFirstOutput = false
+        val watchdogTimeoutMs = 5000L
         
         while (!Thread.interrupted() && isEncoding) {
             try {
@@ -750,6 +790,7 @@ class SurfaceTextureEncoder(
                 
                 when {
                     outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        sawFirstOutput = true
 //                        Log.d(TAG, "Output format changed")
                         mediaCodecVideo?.outputFormat?.let { newFormat ->
 //                            Log.d(TAG, "New format: $newFormat")
@@ -804,6 +845,7 @@ class SurfaceTextureEncoder(
                         val outputBuffer = mediaCodecVideo?.getOutputBuffer(outputBufferIndex)
                         
                         if (outputBuffer != null && videoBufferInfo!!.size > 0) {
+                            sawFirstOutput = true
                             // 读取编码数据
                             val chunk = ByteArray(videoBufferInfo!!.size)
                             outputBuffer.get(chunk)
@@ -832,6 +874,18 @@ class SurfaceTextureEncoder(
                     outputBufferIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
                         // 暂时没有数据，继续
                     }
+                }
+                
+                // 无输出看门狗：configure/start 成功但长时间无任何输出 → 编码器实际不可用，
+                // 快速失败并交由上层降级（而不是"假推流"一直挂着）
+                if (!sawFirstOutput && isEncoding &&
+                    System.nanoTime() - watchdogStartNs > watchdogTimeoutMs * 1_000_000L
+                ) {
+                    handleEncoderFailure(
+                        "视频编码器启动后 ${watchdogTimeoutMs / 1000} 秒无输出，" +
+                            "设备可能不支持 ${width}x${height}@${effectiveVideoFrameRate}fps，请降低分辨率或帧率"
+                    )
+                    break
                 }
                 
             } catch (e: InterruptedException) {
