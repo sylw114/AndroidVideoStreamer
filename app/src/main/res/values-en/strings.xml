@@ -54,6 +54,10 @@
     <string name="camera_back_camera">Rear camera</string>
     <string name="camera_resolution">Resolution</string>
     <string name="camera_frame_rate">Frame Rate</string>
+    <string name="camera_high_fps_warning">60 fps and above depends on the camera vendor implementation. Advertised capabilities may not be available to third-party apps; use the measured streaming frame rate as the result.</string>
+    <string name="camera_actual_fps_measuring">Actual encoded frame rate: measuring…</string>
+    <string name="camera_actual_fps_value">Actual encoded frame rate: %1$.1f fps / target %2$d fps</string>
+    <string name="camera_actual_fps_diagnosis_limited">Diagnosis: camera output did not reach the target frame rate</string>
     <string name="camera_start_camera">Start Camera</string>
     <string name="error_camera_list_failed">Failed to get camera list: %1$s</string>
     <string name="error_audio_start_failed">Failed to start audio: %1$s</string>

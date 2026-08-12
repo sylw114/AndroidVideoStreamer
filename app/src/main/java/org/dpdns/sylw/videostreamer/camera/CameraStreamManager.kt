@@ -12,6 +12,7 @@ import androidx.annotation.RequiresPermission
 import android.app.Activity
 import android.media.MediaRecorder
 import android.graphics.ImageFormat
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.os.Handler
@@ -22,17 +23,21 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.FocusMeteringResult
 import androidx.camera.core.MeteringPoint
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceRequest
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.google.common.util.concurrent.ListenableFuture
 import java.util.concurrent.TimeUnit
 import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.StreamConfig
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
 import org.dpdns.sylw.videostreamer.streaming.StreamingConfig
+import org.dpdns.sylw.videostreamer.streaming.VideoFrameRateDiagnostics
+import kotlin.math.roundToInt
 
 /**
  * Camera 推流管理器
@@ -46,6 +51,10 @@ class CameraStreamManager(private val context: Context) {
 
     companion object {
         private const val TAG = "CameraStreamManager"
+        private const val HIGH_FRAME_RATE_THRESHOLD = 60
+        private const val EXPOSURE_WARM_UP_NS = 750_000_000L
+        private const val EXPOSURE_MAX_WAIT_NS = 1_500_000_000L
+        private const val MAX_EXPOSURE_FRAME_RATIO = 0.9
     }
 
     // Camera2 相关
@@ -70,16 +79,24 @@ class CameraStreamManager(private val context: Context) {
     private var displayPreview: Preview? = null
     private var encoderPreview: Preview? = null
     private var previewSurfaceProvider: Preview.SurfaceProvider? = null
+    private var previewSurfaceTexture: SurfaceTexture? = null
+    private var activePreviewSurface: Surface? = null
     private var lifecycleActivity: Activity? = null
 
     // 🔥 高速模式软件 AE（≥120fps，Camera2 路径）
     private var softwareAe: HighSpeedSoftwareAe? = null
+
+    // 高帧率曝光锁定状态。每次打开摄像头只尝试一次，失败时维持系统 AE。
+    private var highFrameRateExposureAttempted = false
+    private var highFrameRateExposureStartNs = 0L
+    private var highFrameRateExposureResultCount = 0
 
     // 状态回调
     var onCameraReady: ((Boolean) -> Unit)? = null
     var onStreamingStateChanged: ((Boolean) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onInfo: ((String) -> Unit)? = null
+    var onVideoFrameRateMeasured: ((VideoFrameRateDiagnostics) -> Unit)? = null
 
     // 防止递归调用
     private var isHandlingError = false
@@ -151,7 +168,13 @@ class CameraStreamManager(private val context: Context) {
             ?: emptyList()
 
         if (allSizes.isEmpty()) {
-            return CameraInfo(cameraId = cameraId, isFront = isFront, fpsToSizes = emptyMap(), fpsToMin = emptyMap())
+            return CameraInfo(
+                cameraId = cameraId,
+                isFront = isFront,
+                fpsToSizes = emptyMap(),
+                fpsToMin = emptyMap(),
+                highSpeedFpsToSizes = emptyMap()
+            )
         }
 
         // 2. 收集所有可用的帧率值
@@ -186,27 +209,35 @@ class CameraStreamManager(private val context: Context) {
         // 3. 构建 fps → sizes 映射，并记录每个帧率对应的最小可用帧率（来自 AE ranges / high speed ranges）
         val fpsToSizes = mutableMapOf<Int, List<Size>>()
         val fpsToMin = mutableMapOf<Int, Int>()
+        val highSpeedFpsToSizes = mutableMapOf<Int, List<Size>>()
 
         for (fps in fpsSet.filter { it > 0 }.sortedDescending()) {
+            val highSpeedCandidatesForFps = if (fps > 30) {
+                val candidates = mutableListOf<Size>()
+                for (hsSize in highSpeedSizes) {
+                    val hsRangesForSize = try {
+                        configMap?.getHighSpeedVideoFpsRangesFor(hsSize)
+                    } catch (e: IllegalArgumentException) {
+                        Log.w(TAG, "无法读取高速尺寸 ${hsSize.width}x${hsSize.height} 的帧率范围", e)
+                        null
+                    }
+                    val supported = hsRangesForSize?.any { it.upper == fps || (it.lower <= fps && it.upper >= fps) }
+                        ?: false
+                    if (supported) {
+                        candidates.add(hsSize)
+                    }
+                }
+                candidates.sortedByDescending { it.width * it.height }
+            } else {
+                emptyList()
+            }
+            if (highSpeedCandidatesForFps.isNotEmpty()) {
+                highSpeedFpsToSizes[fps] = highSpeedCandidatesForFps
+            }
+
             val sizes = when {
                 // 高速帧率（≥120fps）：仅高速度视频尺寸
-                fps >= 120 -> {
-                    val candidates = mutableListOf<Size>()
-                    for (hsSize in highSpeedSizes) {
-                        val hsRangesForSize = try {
-                            configMap?.getHighSpeedVideoFpsRangesFor(hsSize)
-                        } catch (e: IllegalArgumentException) {
-                            Log.w(TAG, "无法读取高速尺寸 ${hsSize.width}x${hsSize.height} 的帧率范围", e)
-                            null
-                        }
-                        val supported = hsRangesForSize?.any { it.upper == fps || (it.lower <= fps && it.upper >= fps) }
-                            ?: false
-                        if (supported) {
-                            candidates.add(hsSize)
-                        }
-                    }
-                    candidates.sortedByDescending { it.width * it.height }
-                }
+                fps >= 120 -> highSpeedCandidatesForFps
                 // 高帧率（60fps）：minFrameDuration 允许的尺寸
                 fps > 30 -> {
                     allSizes.filter { size ->
@@ -231,10 +262,16 @@ class CameraStreamManager(private val context: Context) {
                     }
                 }
                 if (minForFps == null && highSpeedRanges != null) {
-                    for (r in highSpeedRanges) {
-                        if (r.lower <= fps && r.upper >= fps) {
-                            if (minForFps == null || r.lower < minForFps) minForFps = r.lower
+                    minForFps = if (highSpeedRanges.any { r -> r.lower == fps && r.upper == fps }) {
+                        fps
+                    } else {
+                        var minFromHighSpeed: Int? = null
+                        for (r in highSpeedRanges) {
+                            if (r.lower <= fps && r.upper >= fps) {
+                                if (minFromHighSpeed == null || r.lower < minFromHighSpeed) minFromHighSpeed = r.lower
+                            }
                         }
+                        minFromHighSpeed
                     }
                 }
                 if (minForFps == null) minForFps = fps
@@ -246,7 +283,8 @@ class CameraStreamManager(private val context: Context) {
             cameraId = cameraId,
             isFront = isFront,
             fpsToSizes = fpsToSizes,
-            fpsToMin = fpsToMin
+            fpsToMin = fpsToMin,
+            highSpeedFpsToSizes = highSpeedFpsToSizes
         )
     }
 
@@ -350,19 +388,35 @@ class CameraStreamManager(private val context: Context) {
     }
 
     /**
+     * 设置 Camera2 预览 SurfaceTexture。高速/60fps 路径需要真实 preview Surface。
+     */
+    fun setPreviewSurfaceTexture(surfaceTexture: SurfaceTexture?) {
+        if (previewSurfaceTexture === surfaceTexture) return
+        activePreviewSurface?.release()
+        activePreviewSurface = null
+        previewSurfaceTexture = surfaceTexture
+    }
+
+    /**
      * 手动对焦 + 测光（点击预览区域触发）
      *
      * @param meteringPoint 由 UI 层通过 PreviewView.meteringPointFactory.createPoint(x, y) 生成
+     * @return 对焦结果 Future（可监听判断对焦是否成功），摄像头未就绪时返回 null
      */
-    fun focusAt(meteringPoint: MeteringPoint) {
-        val camera = cameraX ?: return
+    fun focusAt(meteringPoint: MeteringPoint): ListenableFuture<FocusMeteringResult>? {
+        val camera = cameraX ?: return null
         val action = FocusMeteringAction.Builder(
             meteringPoint,
             FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
         )
             .setAutoCancelDuration(3, TimeUnit.SECONDS)
             .build()
-        camera.cameraControl.startFocusAndMetering(action)
+        return try {
+            camera.cameraControl.startFocusAndMetering(action)
+        } catch (e: Exception) {
+            Log.w(TAG, "手动对焦失败", e)
+            null
+        }
     }
 
     /**
@@ -377,12 +431,7 @@ class CameraStreamManager(private val context: Context) {
 
         cameraConfig = config
         lastTargetSurface = targetSurface
-
-        // 普通模式（≤60fps）走 CameraX；高速模式（≥120fps）走 Camera2
-        if (!config.isHighSpeed) {
-            bindCameraX(config, targetSurface)
-            return
-        }
+        resetHighFrameRateExposureState()
 
         // 若已有残留的 camera 资源（异常路径），先关闭
         if (cameraDevice != null) {
@@ -444,11 +493,18 @@ class CameraStreamManager(private val context: Context) {
      * 创建 Camera2 CaptureSession —— 高速模式用 ConstrainedHighSpeed，否则用普通会话
      */
     private fun createCameraSession(camera: CameraDevice, config: CameraConfig, targetSurface: Surface) {
+        val previewSurface = if (config.isHighSpeed) {
+            // 部分厂商的高速会话虽然声明支持 preview+recording，但实际会把编码输出降到 30fps。
+            // 高速推流优先保证编码帧率；普通帧率仍保留预览 Surface。
+            null
+        } else {
+            getOrCreatePreviewSurface(config)
+        }
         val callback = object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(session: CameraCaptureSession) {
                 Log.d(TAG, "Camera capture session configured")
                 captureSession = session
-                startCameraPreview(targetSurface)
+                startCameraPreview(targetSurface, previewSurface)
             }
 
             override fun onConfigureFailed(session: CameraCaptureSession) {
@@ -482,46 +538,101 @@ class CameraStreamManager(private val context: Context) {
                 return
             }
 
-            // 高速模式：附加软件 AE 亮度采样流（ImageReader）
-            val outputs = mutableListOf(OutputConfiguration(targetSurface))
+            // 高速会话对 repeating burst 很敏感，避免软件 AE 重复提交请求导致厂商管线退回普通帧率。
             if (config.isHighSpeed) {
                 softwareAe?.close()
                 softwareAe = null
-                val ae = tryCreateSoftwareAe(config)
-                if (ae != null) {
-                    softwareAe = ae
-                    outputs.add(OutputConfiguration(ae.surface))
-                }
             }
 
+            val outputConfigurations = mutableListOf(OutputConfiguration(targetSurface))
+            previewSurface?.let { outputConfigurations.add(OutputConfiguration(it)) }
+            val sessionParameters = buildBaseCaptureRequest(camera, config, targetSurface, previewSurface)
+                .build()
+            Log.i(
+                TAG,
+                "创建摄像头会话: ${config.width}x${config.height}@${config.frameRate}fps, " +
+                    "highSpeed=${config.isHighSpeed}, outputs=${outputConfigurations.size}, " +
+                    "fpsRange=${selectCaptureFpsRange(config)}"
+            )
+            if (config.isHighSpeed) {
+                @Suppress("DEPRECATION")
+                camera.createConstrainedHighSpeedCaptureSession(
+                    listOfNotNull(targetSurface, previewSurface),
+                    callback,
+                    mainHandler
+                )
+                return
+            }
             val sessionConfig = SessionConfiguration(
-                if(!config.isHighSpeed)SessionConfiguration.SESSION_REGULAR else SessionConfiguration.SESSION_HIGH_SPEED,
-                outputs,
+                SessionConfiguration.SESSION_REGULAR,
+                outputConfigurations,
                 ContextCompat.getMainExecutor(context),
                 callback
-            )
-            try {
-                camera.createCaptureSession(sessionConfig)
-            } catch (e: Exception) {
-                // 若高速会话不接受 ImageReader（个别设备限制），降级为仅编码器输出
-                if (softwareAe != null) {
-                    Log.w(TAG, "高速会话不接受 ImageReader，降级为无软件 AE", e)
-                    softwareAe?.close()
-                    softwareAe = null
-                    val fallbackConfig = SessionConfiguration(
-                        SessionConfiguration.SESSION_HIGH_SPEED,
-                        listOf(OutputConfiguration(targetSurface)),
-                        ContextCompat.getMainExecutor(context),
-                        callback
-                    )
-                    camera.createCaptureSession(fallbackConfig)
-                } else {
-                    throw e
-                }
+            ).apply {
+                setSessionParameters(sessionParameters)
             }
+            camera.createCaptureSession(sessionConfig)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create camera capture session", e)
             onError?.invoke("创建摄像头会话失败: ${e.message}")
+        }
+    }
+
+    private fun getOrCreatePreviewSurface(config: CameraConfig): Surface? {
+        val texture = previewSurfaceTexture ?: return null
+        texture.setDefaultBufferSize(config.width, config.height)
+        return activePreviewSurface ?: Surface(texture).also {
+            activePreviewSurface = it
+        }
+    }
+
+    private fun buildBaseCaptureRequest(
+        device: CameraDevice,
+        config: CameraConfig,
+        targetSurface: Surface,
+        previewSurface: Surface?
+    ): CaptureRequest.Builder {
+        return device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+            addTarget(targetSurface)
+            previewSurface?.let { addTarget(it) }
+            set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+            set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, selectCaptureFpsRange(config))
+        }
+    }
+
+    private fun selectCaptureFpsRange(config: CameraConfig): Range<Int> {
+        if (!config.isHighSpeed) {
+            val fallbackRange = Range(config.minFrameRateForSelected, config.frameRate)
+            val selectedRange = try {
+                val characteristics = cameraManager?.getCameraCharacteristics(config.cameraId)
+                val ranges = characteristics
+                    ?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+                    .orEmpty()
+                ranges.firstOrNull { it.lower == config.frameRate && it.upper == config.frameRate }
+                    ?: ranges.firstOrNull { it.lower <= config.frameRate && it.upper >= config.frameRate }
+                    ?: fallbackRange
+            } catch (e: Exception) {
+                Log.w(TAG, "选择普通帧率范围失败，使用配置默认范围", e)
+                fallbackRange
+            }
+            Log.i(TAG, "普通帧率范围: requested=${config.frameRate}fps, selected=$selectedRange")
+            return selectedRange
+        }
+
+        val selectedSize = Size(config.width, config.height)
+        return try {
+            val characteristics = cameraManager?.getCameraCharacteristics(config.cameraId)
+            val configMap = characteristics?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            val ranges = configMap?.getHighSpeedVideoFpsRangesFor(selectedSize).orEmpty()
+            val selectedRange = ranges.firstOrNull { it.lower == config.frameRate && it.upper == config.frameRate }
+                ?: ranges.firstOrNull { it.lower <= config.frameRate && it.upper >= config.frameRate }
+                ?: Range(config.frameRate, config.frameRate)
+            Log.i(TAG, "高速帧率范围: size=$selectedSize, supported=${ranges.joinToString()}, selected=$selectedRange")
+            selectedRange
+        } catch (e: Exception) {
+            Log.w(TAG, "选择高速帧率范围失败，使用固定帧率", e)
+            Range(config.frameRate, config.frameRate)
         }
     }
 
@@ -553,7 +664,7 @@ class CameraStreamManager(private val context: Context) {
      * - 普通模式：setRepeatingRequest
      * - 高速模式：createHighSpeedRequestList + setRepeatingBurst
      */
-    private fun startCameraPreview(targetSurface: Surface) {
+    private fun startCameraPreview(targetSurface: Surface, previewSurface: Surface?) {
         val config = cameraConfig ?: return
         val session = captureSession ?: return
         val device = cameraDevice ?: return
@@ -561,53 +672,25 @@ class CameraStreamManager(private val context: Context) {
         try {
             Log.d(TAG, "Starting camera preview, target fps=${config.frameRate}, highSpeed=${config.isHighSpeed}")
 
-            val captureRequestBuilder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-
-            captureRequestBuilder.addTarget(targetSurface)
-
-            // 高速模式：附加软件 AE 采样流
+            val captureRequestBuilder = buildBaseCaptureRequest(device, config, targetSurface, previewSurface)
+            // 高速模式：应用软件 AE 当前曝光补偿
             val ae = softwareAe
             if (ae != null) {
-                captureRequestBuilder.addTarget(ae.surface)
-            }
-
-            captureRequestBuilder.set(
-                CaptureRequest.CONTROL_AF_MODE,
-                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO
-            )
-            captureRequestBuilder.set(
-                CaptureRequest.CONTROL_AE_MODE,
-                CaptureRequest.CONTROL_AE_MODE_ON
-            )
-
-            if (config.isHighSpeed && ae != null) {
-                // 高速会话存在第二个输出（软件 AE 采样流）时，帧率范围必须固定（min == max）
-                captureRequestBuilder.set(
-                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                    Range(config.frameRate, config.frameRate)
-                )
                 captureRequestBuilder.set(
                     CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
                     ae.currentCompensation
                 )
-            } else {
-                // 使用存储的最小帧率作为 AE 范围下界，确保设备可以在该范围内调节（例如 15-30fps）
-                captureRequestBuilder.set(
-                    CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE,
-                    Range(config.minFrameRateForSelected, config.frameRate)
-                )
             }
 
             val request = captureRequestBuilder.build()
-
-            if (config.isHighSpeed && session is CameraConstrainedHighSpeedCaptureSession) {
-                Log.d(TAG, "Using High Speed configuration...")
-                val highSpeedRequestList = session.createHighSpeedRequestList(request)
-                session.setRepeatingBurst(highSpeedRequestList, null, null)
-            } else {
-                Log.d(TAG, "Using Normal Speed configuration...")
-                session.setRepeatingRequest(request, null, null)
-            }
+            val captureCallback = createExposureCaptureCallback(
+                config = config,
+                targetSurface = targetSurface,
+                previewSurface = previewSurface,
+                softwareAe = ae
+            )
+            submitRepeatingRequest(session, config, request, captureCallback)
+            scheduleHighFrameRateExposureFallback(session, config, targetSurface, previewSurface)
 
             Log.d(TAG, "Camera preview started successfully")
 
@@ -628,8 +711,261 @@ class CameraStreamManager(private val context: Context) {
         }
     }
 
+    private fun submitRepeatingRequest(
+        session: CameraCaptureSession,
+        config: CameraConfig,
+        request: CaptureRequest,
+        callback: CameraCaptureSession.CaptureCallback?
+    ) {
+        if (config.isHighSpeed && session is CameraConstrainedHighSpeedCaptureSession) {
+            Log.d(TAG, "Using High Speed configuration...")
+            val requestList = session.createHighSpeedRequestList(request)
+            session.setRepeatingBurst(requestList, callback, mainHandler)
+        } else {
+            Log.d(TAG, "Using Normal Speed configuration...")
+            session.setRepeatingRequest(request, callback, mainHandler)
+        }
+    }
+
+    private fun createExposureCaptureCallback(
+        config: CameraConfig,
+        targetSurface: Surface,
+        previewSurface: Surface?,
+        softwareAe: HighSpeedSoftwareAe?
+    ): CameraCaptureSession.CaptureCallback? {
+        if (config.frameRate < HIGH_FRAME_RATE_THRESHOLD && softwareAe == null) return null
+
+        highFrameRateExposureStartNs = System.nanoTime()
+        return object : CameraCaptureSession.CaptureCallback() {
+            override fun onCaptureCompleted(
+                session: CameraCaptureSession,
+                request: CaptureRequest,
+                result: TotalCaptureResult
+            ) {
+                softwareAe?.onCaptureResult(result)
+                maybeLockHighFrameRateExposure(
+                    session = session,
+                    config = config,
+                    targetSurface = targetSurface,
+                    previewSurface = previewSurface,
+                    result = result
+                )
+            }
+        }
+    }
+
+    private fun maybeLockHighFrameRateExposure(
+        session: CameraCaptureSession,
+        config: CameraConfig,
+        targetSurface: Surface,
+        previewSurface: Surface?,
+        result: TotalCaptureResult
+    ) {
+        if (config.frameRate < HIGH_FRAME_RATE_THRESHOLD || highFrameRateExposureAttempted) return
+        if (captureSession !== session || cameraConfig != config) return
+
+        highFrameRateExposureResultCount++
+        val elapsedNs = System.nanoTime() - highFrameRateExposureStartNs
+        if (elapsedNs < EXPOSURE_WARM_UP_NS || highFrameRateExposureResultCount < 10) return
+
+        val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+        val aeSettled = aeState == CaptureResult.CONTROL_AE_STATE_CONVERGED ||
+            aeState == CaptureResult.CONTROL_AE_STATE_LOCKED ||
+            aeState == CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED
+        if (!aeSettled && elapsedNs < EXPOSURE_MAX_WAIT_NS) return
+
+        val exposureTimeNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME) ?: return
+        val sensitivity = result.get(CaptureResult.SENSOR_SENSITIVITY) ?: return
+        val reportedFrameDurationNs = result.get(CaptureResult.SENSOR_FRAME_DURATION)
+        highFrameRateExposureAttempted = true
+
+        Log.i(
+            TAG,
+            "高帧率曝光采样: requested=${config.frameRate}fps, exposure=${exposureTimeNs}ns, " +
+                "sensitivity=$sensitivity, frameDuration=${reportedFrameDurationNs}ns, aeState=$aeState"
+        )
+
+        if (tryApplyManualHighFrameRateExposure(
+                session,
+                config,
+                targetSurface,
+                previewSurface,
+                exposureTimeNs,
+                sensitivity
+            )
+        ) {
+            return
+        }
+
+        if (tryApplyAeLock(
+                session,
+                config,
+                targetSurface,
+                previewSurface,
+                exposureTimeNs
+            )
+        ) {
+            return
+        }
+
+        Log.w(TAG, "设备未能应用高帧率短曝光锁定，继续使用系统自动曝光")
+        onInfo?.invoke("设备未能锁定高帧率短曝光，将继续使用自动曝光")
+    }
+
     /**
-     * 尝试创建高速模式软件 AE 亮度采样流
+     * 部分厂商的 constrained high-speed 会话不回传曝光元数据。
+     * 等待 AE 采样超时后，使用目标帧周期和保守的高 ISO 直接尝试手动短曝光。
+     */
+    private fun scheduleHighFrameRateExposureFallback(
+        session: CameraCaptureSession,
+        config: CameraConfig,
+        targetSurface: Surface,
+        previewSurface: Surface?
+    ) {
+        if (config.frameRate < HIGH_FRAME_RATE_THRESHOLD) return
+
+        mainHandler.postDelayed({
+            if (highFrameRateExposureAttempted) return@postDelayed
+            if (captureSession !== session || cameraConfig != config) return@postDelayed
+
+            val characteristics = try {
+                cameraManager?.getCameraCharacteristics(config.cameraId)
+            } catch (e: Exception) {
+                Log.w(TAG, "读取高帧率曝光兜底参数失败", e)
+                null
+            } ?: return@postDelayed
+            val sensitivityRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+                ?: return@postDelayed
+            val targetFrameDurationNs = 1_000_000_000L / config.frameRate
+            val fallbackExposureTimeNs = (targetFrameDurationNs * MAX_EXPOSURE_FRAME_RATIO).toLong()
+            val fallbackSensitivity = (sensitivityRange.upper / 2)
+                .coerceAtLeast(800)
+                .coerceIn(sensitivityRange.lower, sensitivityRange.upper)
+
+            highFrameRateExposureAttempted = true
+            Log.i(
+                TAG,
+                "高速会话未返回曝光元数据，尝试兜底短曝光: exposure=${fallbackExposureTimeNs}ns, " +
+                    "ISO=$fallbackSensitivity"
+            )
+            if (!tryApplyManualHighFrameRateExposure(
+                    session,
+                    config,
+                    targetSurface,
+                    previewSurface,
+                    fallbackExposureTimeNs,
+                    fallbackSensitivity
+                )
+            ) {
+                onInfo?.invoke("高速会话不接受手动短曝光，将继续使用自动曝光")
+            }
+        }, EXPOSURE_MAX_WAIT_NS / 1_000_000L)
+    }
+
+    private fun tryApplyManualHighFrameRateExposure(
+        session: CameraCaptureSession,
+        config: CameraConfig,
+        targetSurface: Surface,
+        previewSurface: Surface?,
+        measuredExposureTimeNs: Long,
+        measuredSensitivity: Int
+    ): Boolean {
+        return try {
+            val characteristics = cameraManager?.getCameraCharacteristics(config.cameraId) ?: return false
+            val capabilities = characteristics.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+            if (capabilities?.contains(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) != true) {
+                return false
+            }
+
+            val exposureRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+                ?: return false
+            val sensitivityRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+                ?: return false
+            val targetFrameDurationNs = 1_000_000_000L / config.frameRate
+            val exposureLimitNs = (targetFrameDurationNs * MAX_EXPOSURE_FRAME_RATIO).toLong()
+            if (exposureRange.lower > exposureLimitNs) return false
+
+            val lockedExposureTimeNs = measuredExposureTimeNs
+                .coerceAtMost(exposureLimitNs)
+                .coerceIn(exposureRange.lower, exposureRange.upper)
+            val brightnessScale = measuredExposureTimeNs.toDouble() / lockedExposureTimeNs
+            val lockedSensitivity = (measuredSensitivity * brightnessScale)
+                .roundToInt()
+                .coerceIn(sensitivityRange.lower, sensitivityRange.upper)
+
+            val builder = buildBaseCaptureRequest(
+                cameraDevice ?: return false,
+                config,
+                targetSurface,
+                previewSurface
+            ).apply {
+                set(CaptureRequest.CONTROL_AE_LOCK, false)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                set(CaptureRequest.SENSOR_EXPOSURE_TIME, lockedExposureTimeNs)
+                set(CaptureRequest.SENSOR_SENSITIVITY, lockedSensitivity)
+                set(CaptureRequest.SENSOR_FRAME_DURATION, targetFrameDurationNs)
+            }
+            submitRepeatingRequest(session, config, builder.build(), null)
+
+            val exposureMs = lockedExposureTimeNs / 1_000_000.0
+            Log.i(
+                TAG,
+                "已应用高帧率手动曝光: ${"%.2f".format(exposureMs)}ms, ISO=$lockedSensitivity, " +
+                    "frameDuration=${targetFrameDurationNs}ns"
+            )
+            onInfo?.invoke(
+                "已锁定短曝光 ${"%.2f".format(exposureMs)} ms / ISO $lockedSensitivity，优先保证 ${config.frameRate}fps"
+            )
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "高帧率手动曝光请求被设备拒绝，尝试 AE 锁定", e)
+            false
+        }
+    }
+
+    private fun tryApplyAeLock(
+        session: CameraCaptureSession,
+        config: CameraConfig,
+        targetSurface: Surface,
+        previewSurface: Surface?,
+        measuredExposureTimeNs: Long
+    ): Boolean {
+        return try {
+            val characteristics = cameraManager?.getCameraCharacteristics(config.cameraId) ?: return false
+            if (characteristics.get(CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE) != true) return false
+
+            val targetFrameDurationNs = 1_000_000_000L / config.frameRate
+            val exposureLimitNs = (targetFrameDurationNs * MAX_EXPOSURE_FRAME_RATIO).toLong()
+            if (measuredExposureTimeNs > exposureLimitNs) return false
+
+            val builder = buildBaseCaptureRequest(
+                cameraDevice ?: return false,
+                config,
+                targetSurface,
+                previewSurface
+            ).apply {
+                set(CaptureRequest.CONTROL_AE_LOCK, true)
+            }
+            submitRepeatingRequest(session, config, builder.build(), null)
+
+            val exposureMs = measuredExposureTimeNs / 1_000_000.0
+            Log.i(TAG, "已应用高帧率 AE 锁定: ${"%.2f".format(exposureMs)}ms")
+            onInfo?.invoke("已锁定自动曝光 ${"%.2f".format(exposureMs)} ms，正在检测实际帧率")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "高帧率 AE 锁定请求被设备拒绝", e)
+            false
+        }
+    }
+
+    private fun resetHighFrameRateExposureState() {
+        highFrameRateExposureAttempted = false
+        highFrameRateExposureStartNs = 0L
+        highFrameRateExposureResultCount = 0
+    }
+
+    /**
+     * 尝试创建高速模式软件 AE（基于 CaptureResult 曝光参数闭环）
      *
      * 仅当设备支持曝光补偿（CONTROL_AE_COMPENSATION_RANGE 非 [0,0]）时创建，
      * 否则返回 null（维持原行为）。
@@ -643,8 +979,7 @@ class CameraStreamManager(private val context: Context) {
                 return null
             }
             HighSpeedSoftwareAe(
-                width = config.width,
-                height = config.height,
+                frameDurationNs = 1_000_000_000L / config.frameRate,
                 compensationRange = compRange,
                 onExposureChanged = { compensation ->
                     updateHighSpeedExposure(compensation)
@@ -663,17 +998,12 @@ class CameraStreamManager(private val context: Context) {
         val config = cameraConfig ?: return
         val device = cameraDevice ?: return
         val session = captureSession ?: return
-        val ae = softwareAe ?: return
         val targetSurface = lastTargetSurface ?: return
+        val previewSurface = activePreviewSurface
         if (session !is CameraConstrainedHighSpeedCaptureSession) return
 
         try {
-            val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-            builder.addTarget(targetSurface)
-            builder.addTarget(ae.surface)
-            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-            builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(config.frameRate, config.frameRate))
+            val builder = buildBaseCaptureRequest(device, config, targetSurface, previewSurface)
             builder.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, compensation)
             val requestList = session.createHighSpeedRequestList(builder.build())
             session.setRepeatingBurst(requestList, null, null)
@@ -750,12 +1080,7 @@ class CameraStreamManager(private val context: Context) {
         lifecycleActivity = activity
 
         fun onSurfaceReady(surface: Surface) {
-            // 普通模式（≤60fps）走 CameraX；高速模式（≥120fps）走 Camera2
-            if (cameraConfig.isHighSpeed) {
-                openCamera(cameraConfig, surface)
-            } else {
-                bindCameraX(cameraConfig, surface)
-            }
+            openCamera(cameraConfig, surface)
         }
         streamManager = StreamManager(activity, {
             onSurfaceReady(it)
@@ -767,7 +1092,8 @@ class CameraStreamManager(private val context: Context) {
             iFrameInterval = 5,
             videoMode = StreamConfig.getRateMode()!!,
             videoQuality = StreamConfig.getCqQuality()!!,
-            useAudio = false        // 摄像头模式不采集音频
+            useAudio = false,       // 摄像头模式不采集音频
+            requireHardwareVideoEncoder = true
         )
         ).apply {
             onStreamingStateChanged = { isStreaming ->
@@ -792,6 +1118,10 @@ class CameraStreamManager(private val context: Context) {
 
             onInfo = { message ->
                 this@CameraStreamManager.onInfo?.invoke(message)
+            }
+
+            onVideoFrameRateMeasured = { diagnostics ->
+                this@CameraStreamManager.onVideoFrameRateMeasured?.invoke(diagnostics)
             }
         }
         if (streamManager == null) {
@@ -866,6 +1196,7 @@ class CameraStreamManager(private val context: Context) {
             Log.w(TAG, "Ignored exception while closing software AE", e)
         }
         softwareAe = null
+        resetHighFrameRateExposureState()
 
         // Closing a CameraCaptureSession may internally call stopRepeating() which can
         // throw CameraAccessException (CAMERA_ERROR) if the device is already in an
@@ -884,6 +1215,14 @@ class CameraStreamManager(private val context: Context) {
         }
         if (!closeCaptureSession || captureSession != null) {
             captureSession = null
+        }
+
+        try {
+            activePreviewSurface?.release()
+        } catch (e: Exception) {
+            Log.w(TAG, "Ignored exception while releasing preview surface", e)
+        } finally {
+            activePreviewSurface = null
         }
 
         try {
@@ -926,6 +1265,7 @@ class CameraStreamManager(private val context: Context) {
         onStreamingStateChanged = null
         onError = null
         onInfo = null
+        onVideoFrameRateMeasured = null
 
         Log.d(TAG, "CameraStreamManager released")
     }
@@ -941,7 +1281,9 @@ class CameraStreamManager(private val context: Context) {
         val isFront: Boolean,
         val fpsToSizes: Map<Int, List<Size>>,
         /** 每个帧率对应的最小帧率（下界） */
-        val fpsToMin: Map<Int, Int>
+        val fpsToMin: Map<Int, Int>,
+        /** 来自 Camera2 high-speed 表的帧率->分辨率映射，用于决定是否需要受限高速会话 */
+        val highSpeedFpsToSizes: Map<Int, List<Size>> = emptyMap()
     ) {
         /** 所有可选的帧率（从高到低） */
         val allFrameRates: List<Int>
@@ -978,10 +1320,15 @@ class CameraStreamManager(private val context: Context) {
         /** 完整的帧率->分辨率映射（来源于 CameraInfo），用于后续打开摄像头时参考可用最小帧率 */
         val fpsToSizes: Map<Int, List<Size>> = emptyMap(),
         /** 每个帧率对应的最小帧率（下界），用于设置 AE 范围 */
-        val fpsToMin: Map<Int, Int> = emptyMap()
+        val fpsToMin: Map<Int, Int> = emptyMap(),
+        /** 来自 Camera2 high-speed 表的帧率->分辨率映射 */
+        val highSpeedFpsToSizes: Map<Int, List<Size>> = emptyMap()
     ) {
-        /** 是否高速模式（≥120fps 需要用 ConstrainedHighSpeedCaptureSession） */
-        val isHighSpeed: Boolean get() = frameRate >= 120
+        /** 是否需要受限高速会话（所选尺寸必须出现在 Camera2 high-speed 表中） */
+        val isHighSpeed: Boolean
+            get() = frameRate >= 120 && highSpeedFpsToSizes[frameRate]?.any {
+                it.width == width && it.height == height
+            } == true
 
         /** 当前选中帧率对应的最小帧率（用于设置 CONTROL_AE_TARGET_FPS_RANGE 的下界） */
         val minFrameRateForSelected: Int get() = fpsToMin[frameRate] ?: frameRate

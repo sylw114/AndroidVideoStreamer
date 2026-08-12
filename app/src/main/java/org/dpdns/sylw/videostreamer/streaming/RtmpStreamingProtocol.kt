@@ -22,6 +22,7 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
     override var onStreamingStateChanged: ((Boolean) -> Unit)? = null
     override var onError: ((String) -> Unit)? = null
     override var onInfo: ((String) -> Unit)? = null
+    override var onVideoFrameRateMeasured: ((VideoFrameRateDiagnostics) -> Unit)? = null
 
     // 防止 onError 递归调用
     private var isHandlingError = false
@@ -49,7 +50,8 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
                 audioSampleRate = config.audioSampleRate,
                 audioChannelCount = config.audioChannelCount,
                 audioBitrate = config.audioBitrate,
-                onSurfaceReady
+                requireHardwareVideoEncoder = config.requireHardwareVideoEncoder,
+                onSurfaceReady = onSurfaceReady
             ).apply {
 
                 // 转发状态回调
@@ -76,6 +78,10 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
 
                 onInfo = { message ->
                     this@RtmpStreamingProtocol.onInfo?.invoke(message)
+                }
+
+                onVideoFrameRateMeasured = { diagnostics ->
+                    this@RtmpStreamingProtocol.onVideoFrameRateMeasured?.invoke(diagnostics)
                 }
 
                 // 启动编码器（会创建 input surface 并开始推流）
@@ -228,5 +234,6 @@ class RtmpStreamingProtocol(override val onSurfaceReady: (Surface) -> Unit) : IS
         onStreamingStateChanged = null
         onError = null
         onInfo = null
+        onVideoFrameRateMeasured = null
     }
 }

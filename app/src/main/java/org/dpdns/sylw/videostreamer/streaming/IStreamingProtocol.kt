@@ -95,12 +95,29 @@ interface IStreamingProtocol {
     var onInfo: ((String) -> Unit)?
 
     /**
+     * 设置实际视频帧率诊断回调
+     */
+    var onVideoFrameRateMeasured: ((VideoFrameRateDiagnostics) -> Unit)?
+
+    /**
      * 编码器输入 Surface 就绪回调
      * 当协议层创建好编码器的输入 Surface 后触发，UI 层可用该 Surface
      * 连接 Camera2（摄像头模式）或更新 VirtualDisplay（录屏模式）。
      */
     val onSurfaceReady: (Surface) -> Unit
 }
+
+/**
+ * 编码输出的实际帧率诊断结果
+ *
+ * actualFps 基于编码帧 PTS 计算，与播放器看到的视频时间轴一致；
+ * wallClockFps 用于辅助判断编码线程是否存在阻塞。
+ */
+data class VideoFrameRateDiagnostics(
+    val requestedFps: Int,
+    val actualFps: Double,
+    val wallClockFps: Double
+)
 
 /**
  * 推流配置数据类
@@ -120,4 +137,5 @@ data class StreamingConfig(
     val audioSampleRate: Int = 48000,
     val audioChannelCount: Int = 2,
     val audioBitrate: Int = 128_000,   // 128 kbps
+    val requireHardwareVideoEncoder: Boolean = false
 )

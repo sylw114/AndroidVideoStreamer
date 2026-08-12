@@ -3,8 +3,10 @@ package org.dpdns.sylw.videostreamer.rtmpStreamer
 import android.Manifest
 import android.media.*
 import android.os.Build
+import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresPermission
+import org.dpdns.sylw.videostreamer.streaming.VideoFrameRateDiagnostics
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -31,6 +33,7 @@ class SurfaceTextureEncoder(
     private val audioSampleRate: Int = 48000,  // 音频采样率
     private val audioChannelCount: Int = 2,    // 音频声道数
     private val audioBitrate: Int = 128000,     // 音频码率 bps
+    private val requireHardwareVideoEncoder: Boolean = false,
     private val onSurfaceReady: ((Surface) -> Unit)
 ) {
     companion object {
@@ -93,6 +96,7 @@ class SurfaceTextureEncoder(
     var onStreamStateChanged: ((Boolean) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onInfo: ((String) -> Unit)? = null
+    var onVideoFrameRateMeasured: ((VideoFrameRateDiagnostics) -> Unit)? = null
     
     // 缓存的 AVCC 配置（从 csd-0/csd-1 合并）
     private var cachedAVCCConfig: ByteArray? = null
@@ -224,7 +228,8 @@ class SurfaceTextureEncoder(
 //            Log.d(TAG, "Starting encoder: ${width}x${height}, bitrate=$videoBitrate, fps=$frameRate")
             val encoderChoices = selectVideoEncoder(width, height, frameRate)
             if (encoderChoices.isEmpty()) {
-                throw IllegalStateException("当前设备没有可用于 ${width}x${height} 的 H.264 视频编码器")
+                val encoderType = if (requireHardwareVideoEncoder) "硬件 H.264 视频编码器" else "H.264 视频编码器"
+                throw IllegalStateException("当前设备没有可用于 ${width}x${height}@${frameRate}fps 的$encoderType")
             }
             // 保存完整候选列表，initVideoEncoder 会逐个尝试（configure 失败切下一个候选）
             videoEncoderCandidates = encoderChoices
@@ -342,6 +347,12 @@ class SurfaceTextureEncoder(
             selectedVideoEncoderName = null
             videoEncoderCandidates = null
             effectiveVideoFrameRate = frameRate
+            videoOutputFrameCount = 0L
+            videoOutputStartNs = 0L
+            frameRateWindowStartNs = 0L
+            frameRateWindowStartPtsUs = -1L
+            frameRateWindowFrameCount = 0
+            actualFrameRateWarned = false
             spsPpsSent = false
             initialVideoPtsUs = -1L
             lastVideoTimestampMs = 0L
@@ -383,7 +394,8 @@ class SurfaceTextureEncoder(
             ?: selectedVideoEncoderName?.let { listOf(VideoEncoderChoice(it, effectiveVideoFrameRate)) }
             ?: selectVideoEncoder(width, height, frameRate)
         if (choices.isEmpty()) {
-            throw IllegalStateException("当前设备没有可用于 ${width}x${height} 的 H.264 视频编码器")
+            val encoderType = if (requireHardwareVideoEncoder) "硬件 H.264 视频编码器" else "H.264 视频编码器"
+            throw IllegalStateException("当前设备没有可用于 ${width}x${height}@${frameRate}fps 的$encoderType")
         }
 
         var lastError: Exception? = null
@@ -731,6 +743,7 @@ class SurfaceTextureEncoder(
 
         for (codecInfo in codecInfos) {
             if (!codecInfo.isEncoder) continue
+            if (requireHardwareVideoEncoder && (codecInfo.isSoftwareOnly || !codecInfo.isHardwareAccelerated)) continue
             if (codecInfo.supportedTypes.none { it.equals(VIDEO_MIME_TYPE, ignoreCase = true) }) continue
 
             val capabilities = runCatching { codecInfo.getCapabilitiesForType(VIDEO_MIME_TYPE) }.getOrNull()
@@ -740,7 +753,7 @@ class SurfaceTextureEncoder(
                 ?: continue
 
             val supportedFps = if (querySize.isExactSupported) {
-                if (videoCapabilities.areSizeAndRateSupported(querySize.width, querySize.height, requestedFps.toDouble())) {
+                if (requireHardwareVideoEncoder || videoCapabilities.areSizeAndRateSupported(querySize.width, querySize.height, requestedFps.toDouble())) {
                     requestedFps
                 } else {
                     runCatching {
@@ -748,13 +761,24 @@ class SurfaceTextureEncoder(
                     }.getOrDefault(30).coerceAtLeast(1)
                 }
             } else {
-                // 粗筛通过的尺寸能力表没有精确数据，先按全局帧率上界估算，运行时不达标由看门狗兜底
-                runCatching {
-                    videoCapabilities.supportedFrameRates.upper
-                }.getOrDefault(30).coerceAtLeast(1)
+                if (requireHardwareVideoEncoder) {
+                    // 相机模式需要硬件编码 Surface 直连 Camera2，高速帧率不信任编码器能力表的粗略上界。
+                    // 部分设备能力表会低报 30fps，但 configure + Camera2 实际可以按高速 request 输入。
+                    requestedFps
+                } else {
+                    runCatching {
+                        videoCapabilities.supportedFrameRates.upper
+                    }.getOrDefault(30).coerceAtLeast(1)
+                }
             }
 
-            choices += VideoEncoderChoice(codecInfo.name, supportedFps.coerceIn(1, requestedFps))
+            val choice = VideoEncoderChoice(codecInfo.name, supportedFps.coerceIn(1, requestedFps))
+            Log.i(
+                TAG,
+                "编码器候选: ${choice.codecName}, requested=${requestedFps}fps, " +
+                    "selected=${choice.frameRate}fps, hardwareRequired=$requireHardwareVideoEncoder, exactSize=${querySize.isExactSupported}"
+            )
+            choices += choice
         }
 
         // 稳定排序：帧率降序，帧率相同时保持原有顺序（硬件在前、软件在后）
@@ -770,6 +794,12 @@ class SurfaceTextureEncoder(
     // 🔥 关键修复：视频时间戳必须独立维护，保证单调递增
     // RTMP 协议要求：音频流、视频流各自单调递增，混合流也应单调递增
     private var lastVideoTimestampMs = 0L // 上一个视频帧的时间戳
+    private var videoOutputFrameCount = 0L
+    private var videoOutputStartNs = 0L
+    private var frameRateWindowStartNs = 0L
+    private var frameRateWindowStartPtsUs = -1L
+    private var frameRateWindowFrameCount = 0
+    private var actualFrameRateWarned = false
     
     private fun encodeVideoLoop() {
         videoBufferInfo = MediaCodec.BufferInfo()
@@ -1027,6 +1057,57 @@ class SurfaceTextureEncoder(
                 } else {
                     timestampMs
                 }.also { lastVideoTimestampMs = it }
+            }
+
+            val outputTimeNs = System.nanoTime()
+            if (videoOutputStartNs == 0L) videoOutputStartNs = outputTimeNs
+            videoOutputFrameCount++
+
+            if (frameRateWindowStartNs == 0L) {
+                frameRateWindowStartNs = outputTimeNs
+                frameRateWindowStartPtsUs = bufferInfo.presentationTimeUs
+                frameRateWindowFrameCount = 1
+            } else {
+                frameRateWindowFrameCount++
+            }
+
+            val windowElapsedNs = outputTimeNs - frameRateWindowStartNs
+            val windowElapsedPtsUs = bufferInfo.presentationTimeUs - frameRateWindowStartPtsUs
+            if (windowElapsedNs >= 1_000_000_000L &&
+                windowElapsedPtsUs > 0L &&
+                frameRateWindowFrameCount > 1
+            ) {
+                val frameIntervals = frameRateWindowFrameCount - 1
+                val wallFps = frameIntervals * 1_000_000_000.0 / windowElapsedNs
+                val ptsFps = frameIntervals * 1_000_000.0 / windowElapsedPtsUs
+                Log.i(
+                    TAG,
+                    "编码输出统计: frames=$videoOutputFrameCount, requested=${frameRate}fps, " +
+                        "effective=${effectiveVideoFrameRate}fps, wallFps=${"%.1f".format(wallFps)}, " +
+                        "ptsFps=${"%.1f".format(ptsFps)}, lastPts=${presentationTimeMs}ms"
+                )
+                onVideoFrameRateMeasured?.invoke(
+                    VideoFrameRateDiagnostics(
+                        requestedFps = frameRate,
+                        actualFps = ptsFps,
+                        wallClockFps = wallFps
+                    )
+                )
+                if (!actualFrameRateWarned &&
+                    frameRate > 30 &&
+                    outputTimeNs - videoOutputStartNs >= 2_000_000_000L &&
+                    ptsFps > 0.0 &&
+                    ptsFps < frameRate * 0.75
+                ) {
+                    actualFrameRateWarned = true
+                    val actualFpsText = "%.1f".format(ptsFps)
+                    Log.w(TAG, "设备实际摄像头输出帧率偏低: requested=${frameRate}fps, actual=${actualFpsText}fps")
+                    onInfo?.invoke("设备实际只输出约 ${actualFpsText}fps，已低于请求的 ${frameRate}fps；请降低帧率或分辨率")
+                }
+
+                frameRateWindowStartNs = outputTimeNs
+                frameRateWindowStartPtsUs = bufferInfo.presentationTimeUs
+                frameRateWindowFrameCount = 1
             }
             
 //            Log.d(TAG, "🎬 Video frame: key=$isKeyFrame, ts=$presentationTimeMs ms (pts=${bufferInfo.presentationTimeUs}us)")

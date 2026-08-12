@@ -35,6 +35,7 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
     var onStreamingStateChanged: ((Boolean) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onInfo: ((String) -> Unit)? = null
+    var onVideoFrameRateMeasured: ((VideoFrameRateDiagnostics) -> Unit)? = null
     
     /**
      * 初始化推流管理器（默认使用 RTMP 协议）
@@ -66,6 +67,10 @@ class StreamManager(private val activity: Activity, val onSurfaceReady: ((androi
 
             onInfo = { message ->
                 this@StreamManager.onInfo?.invoke(message)
+            }
+
+            onVideoFrameRateMeasured = { diagnostics ->
+                this@StreamManager.onVideoFrameRateMeasured?.invoke(diagnostics)
             }
         }
 

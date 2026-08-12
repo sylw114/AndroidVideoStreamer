@@ -2,12 +2,14 @@ package org.dpdns.sylw.videostreamer
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
+import android.view.TextureView
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.view.PreviewView
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -15,24 +17,34 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.dpdns.sylw.videostreamer.camera.CameraStreamManager
+import org.dpdns.sylw.videostreamer.streaming.VideoFrameRateDiagnostics
 import org.dpdns.sylw.videostreamer.ui.theme.VideoStreamerTheme
 import org.dpdns.sylw.videostreamer.ui.components.SafeButton
 import org.dpdns.sylw.videostreamer.ui.components.SafeButtonState
+
+/** 对焦提示状态 */
+private enum class FocusStatus { FOCUSING, SUCCESS, FAILED }
+
+/** 对焦提示（位置 + 状态），坐标与预览点击坐标一致（px） */
+private data class FocusIndicator(val x: Float, val y: Float, val status: FocusStatus)
 
 /**
  * Camera 推流页面
@@ -60,6 +72,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     var isStreaming by remember { mutableStateOf(false) }
     var isPending by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var frameRateDiagnostics by remember { mutableStateOf<VideoFrameRateDiagnostics?>(null) }
     
     // 配置选项
     var selectedCameraId by remember { mutableStateOf<String?>(null) }
@@ -85,8 +98,11 @@ fun CameraWindow(modifier: Modifier = Modifier) {
 
     var pendingAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
-    // 🔥 预览视图（CameraX PreviewView，用于预览 + 点击对焦）
-    var previewView by remember { mutableStateOf<PreviewView?>(null) }
+    // 🔥 预览视图（Camera2 TextureView，用于向会话提供 preview Surface）
+    var previewView by remember { mutableStateOf<TextureView?>(null) }
+
+    // 🔥 对焦提示（对焦框 + 状态），null 表示不显示
+    var focusIndicator by remember { mutableStateOf<FocusIndicator?>(null) }
     
     // 权限请求
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -120,6 +136,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 scope.launch {
                     isStreaming = streaming
                     isPending = false  // 连接完成或断开，清除 pending
+                    if (!streaming) frameRateDiagnostics = null
                 }
             }
 
@@ -136,6 +153,12 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                     Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                 }
             }
+
+            onVideoFrameRateMeasured = { diagnostics ->
+                scope.launch {
+                    frameRateDiagnostics = diagnostics
+                }
+            }
         }
     }
 
@@ -149,6 +172,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else if (!isPending) {
             isPending = true
+            frameRateDiagnostics = null
 
             fun startStreaming() {
                 scope.launch {
@@ -181,7 +205,8 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                             height = height,
                             frameRate = selectedFrameRate,
                             fpsToSizes = currentCameraInfo?.fpsToSizes ?: emptyMap(),
-                            fpsToMin = currentCameraInfo?.fpsToMin ?: emptyMap()
+                            fpsToMin = currentCameraInfo?.fpsToMin ?: emptyMap(),
+                            highSpeedFpsToSizes = currentCameraInfo?.highSpeedFpsToSizes ?: emptyMap()
                         )
                         val currentActivity = activity!!
                         withContext(Dispatchers.IO) {
@@ -240,12 +265,18 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         videoQuality = StreamConfig.getCqQuality()!!
     }
 
-    // 🔥 预览 SurfaceProvider 绑定到 Camera 管理器（普通模式 CameraX 显示预览需要）
-    // 双 key：previewView 与 cameraManager 任一初始化完成后都重新绑定
+    // 🔥 预览 SurfaceTexture 绑定到 Camera 管理器（Camera2 会话需要真实 preview Surface）
     LaunchedEffect(previewView, cameraManager) {
         previewView?.let { view ->
-            cameraManager?.setPreviewSurfaceProvider(view.surfaceProvider)
+            if (view.isAvailable) {
+                cameraManager?.setPreviewSurfaceTexture(view.surfaceTexture)
+            }
         }
+    }
+
+    // 🔥 停止推流后隐藏预览画面
+    LaunchedEffect(isStreaming) {
+        previewView?.alpha = if (isStreaming) 1f else 0f
     }
     
     // 当摄像头切换时，更新默认帧率和分辨率
@@ -295,30 +326,61 @@ fun CameraWindow(modifier: Modifier = Modifier) {
         modifier = modifier
             .fillMaxSize()
     ) {
-        // 🔥 预览视图（CameraX PreviewView，点击区域手动对焦 + 测光）
+        // 🔥 预览视图（Camera2 TextureView）
         AndroidView(
             factory = { ctx ->
-                PreviewView(ctx).apply {
-                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                TextureView(ctx).apply {
+                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                            cameraManager?.setPreviewSurfaceTexture(surface)
+                        }
+
+                        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                            cameraManager?.setPreviewSurfaceTexture(surface)
+                        }
+
+                        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                            cameraManager?.setPreviewSurfaceTexture(null)
+                            return true
+                        }
+
+                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+                    }
                 }
             },
             update = { view ->
                 previewView = view
+                if (view.isAvailable) {
+                    cameraManager?.setPreviewSurfaceTexture(view.surfaceTexture)
+                }
             },
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
                     detectTapGestures { offset ->
-                        // 点击预览区域 → 手动对焦 + 测光（仅推流中摄像头已打开时有意义）
-                        val view = previewView
-                        val manager = cameraManager
-                        if (view != null && manager != null) {
-                            val point = view.meteringPointFactory.createPoint(offset.x, offset.y)
-                            manager.focusAt(point)
+                        focusIndicator = FocusIndicator(offset.x, offset.y, FocusStatus.FOCUSING)
+                        scope.launch {
+                            delay(300)
+                            focusIndicator = null
                         }
                     }
                 }
         )
+
+        // 🔥 对焦提示框（位置跟随点击坐标，颜色随状态变化）
+        focusIndicator?.let { indicator ->
+            val borderColor = when (indicator.status) {
+                FocusStatus.FOCUSING -> Color.Yellow
+                FocusStatus.SUCCESS -> Color.Green
+                FocusStatus.FAILED -> Color.Red
+            }
+            Box(
+                modifier = Modifier
+                    .offset { IntOffset((indicator.x - 30).toInt(), (indicator.y - 30).toInt()) }
+                    .size(60.dp)
+                    .border(2.dp, borderColor)
+            )
+        }
 
         Column(
             modifier = Modifier
@@ -355,7 +417,51 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 Text(
                     text = stringResource(R.string.camera_no_audio),
                 )
-                
+
+                if (selectedFrameRate >= 60) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = stringResource(R.string.camera_high_fps_warning),
+                        color = MaterialTheme.colorScheme.tertiary,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+
+                if (isStreaming) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val diagnostics = frameRateDiagnostics
+                    if (diagnostics == null) {
+                        Text(
+                            text = stringResource(R.string.camera_actual_fps_measuring),
+                            color = Color.Gray,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    } else {
+                        val isFrameRateLimited = diagnostics.requestedFps >= 60 &&
+                            diagnostics.actualFps < diagnostics.requestedFps * 0.75
+                        Text(
+                            text = stringResource(
+                                R.string.camera_actual_fps_value,
+                                diagnostics.actualFps,
+                                diagnostics.requestedFps
+                            ),
+                            color = if (isFrameRateLimited) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                Color.Green
+                            },
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        if (isFrameRateLimited) {
+                            Text(
+                                text = stringResource(R.string.camera_actual_fps_diagnosis_limited),
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                }
+
                 if (isStreaming) {
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(

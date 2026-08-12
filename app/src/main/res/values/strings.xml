@@ -54,6 +54,10 @@
     <string name="camera_back_camera">后置摄像头</string>
     <string name="camera_resolution">分辨率</string>
     <string name="camera_frame_rate">帧率</string>
+    <string name="camera_high_fps_warning">60 fps 及以上依赖厂商摄像头实现，能力列表不保证第三方应用可用，请以推流后的实测帧率为准。</string>
+    <string name="camera_actual_fps_measuring">实际编码帧率：检测中…</string>
+    <string name="camera_actual_fps_value">实际编码帧率：%1$.1f fps / 目标 %2$d fps</string>
+    <string name="camera_actual_fps_diagnosis_limited">诊断：摄像头实际输出未达到目标帧率</string>
     <string name="camera_start_camera">启动摄像头</string>
     <string name="camera_stop_camera">停止摄像头</string>
     <string name="error_camera_list_failed">无法获取摄像头列表：%1$s</string>
