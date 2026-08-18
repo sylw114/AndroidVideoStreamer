@@ -1,43 +1,40 @@
-package org.dpdns.sylw.videostreamer.rtmpStreamer
+package org.dpdns.sylw.videostreamer.encoding
 
 import android.Manifest
 import android.media.*
-import android.os.Build
+import android.os.Bundle
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.RequiresPermission
-import org.dpdns.sylw.videostreamer.streaming.VideoFrameRateDiagnostics
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlin.math.floor
 
 /**
- * SurfaceTexture 编码器
- * 从 SurfaceTexture 获取视频数据，编码为 H.264 并通过 RTMP 推送
- * 
- * 🔥 支持两种模式：
- * 1. MediaProjection 模式：用于屏幕录制推流
- * 2. Camera 模式：用于摄像头推流（不需要 MediaProjection）
+ * 基于 MediaCodec 的音视频编码器。
+ *
+ * 编码器只负责创建输入 Surface、编码以及输出 AVCC/AAC 数据。URL、协议连接、
+ * 重连和传输状态均由上层会话管理，避免编码热路径与具体网络协议互相持有。
  */
-class SurfaceTextureEncoder(
+class MediaCodecEncoder(
     private val width: Int,
     private val height: Int,
-    private val dpi: Int,
     private val videoBitrate: Int,        // 视频码率 bps
     private val frameRate: Int = 30,       // 帧率
-    private val iFrameInterval: Int = 1,   // 🔥 极低延迟：I帧间隔从2秒降到1秒
-    private val videoMode: String = "CBR", // 🔥 新增：编码模式
-    private val videoQuality: Int = 70,    // 🔥 新增：编码质量
+    private val iFrameInterval: Int = 1,   // LiveSuite 的实时媒体需要较短 GOP 以便丢帧后快速恢复
+    private val videoMode: String = "CBR",
+    private val videoQuality: Int = 70,
+    private val repeatPreviousFrameAfterUs: Long? = null,
     private val useAudio: Boolean = true,  // 是否使用音频
     private val audioSampleRate: Int = 48000,  // 音频采样率
     private val audioChannelCount: Int = 2,    // 音频声道数
     private val audioBitrate: Int = 128000,     // 音频码率 bps
     private val requireHardwareVideoEncoder: Boolean = false,
-    private val onSurfaceReady: ((Surface) -> Unit)
-) {
+    private val onSurfaceReady: ((Surface) -> Unit),
+    private val output: EncodedMediaOutput
+) : StreamingEncoder {
     companion object {
-        private const val TAG = "SurfaceTextureEncoder"
+        private const val TAG = "MediaCodecEncoder"
         private const val VIDEO_MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
         private const val AUDIO_MIME_TYPE = MediaFormat.MIMETYPE_AUDIO_AAC
         // H.264 规范的单边最大尺寸，能力表粗筛时使用（超出必不支持）
@@ -73,7 +70,8 @@ class SurfaceTextureEncoder(
     private var mediaCodecVideo: MediaCodec? = null
     private var surface: Surface? = null
     private var videoBufferInfo: MediaCodec.BufferInfo? = null
-    private var effectiveVideoFrameRate: Int = frameRate
+    override var effectiveFrameRate: Int = frameRate
+        private set
     private var selectedVideoEncoderName: String? = null
     // 按优先级排序的视频编码器候选列表（硬件优先、帧率降序），initVideoEncoder 逐个尝试
     private var videoEncoderCandidates: List<VideoEncoderChoice>? = null
@@ -81,22 +79,21 @@ class SurfaceTextureEncoder(
     // 音频编码相关
     private var mediaCodecAudio: MediaCodec? = null
     private var audioBufferInfo: MediaCodec.BufferInfo? = null
+    @Volatile
     private var isAudioRecording = false
     
     // 编码线程
     private var encodeThread: Thread? = null
+    @Volatile
     private var isEncoding = false
+    private var isPrepared = false
     private val cleanupLock = Any()
     private var isCleaningUp = false
     
-    // RTMP 推流器
-    private var rtmpPusher: RtmpPusher? = null
-    
     // 状态回调
-    var onStreamStateChanged: ((Boolean) -> Unit)? = null
-    var onError: ((String) -> Unit)? = null
-    var onInfo: ((String) -> Unit)? = null
-    var onVideoFrameRateMeasured: ((VideoFrameRateDiagnostics) -> Unit)? = null
+    override var onError: ((String) -> Unit)? = null
+    override var onInfo: ((String) -> Unit)? = null
+    override var onVideoFrameRateMeasured: ((VideoFrameRateDiagnostics) -> Unit)? = null
     
     // 缓存的 AVCC 配置（从 csd-0/csd-1 合并）
     private var cachedAVCCConfig: ByteArray? = null
@@ -104,126 +101,12 @@ class SurfaceTextureEncoder(
     // 🔥 缓存的 AudioSpecificConfig（从音频编码器 csd-0 提取）
     private var cachedAudioSpecificConfig: ByteArray? = null
     
-    // 🔥 统一的时间基准：推流开始时的系统时间（纳秒）
-    private var streamStartTimeNs = -1L
+    // 音视频共用单调时钟；PCM 缓存保存尚未提交帧的真实采集起点。
+    private var mediaTimelineOriginNs = 0L
+    private var audioPendingCaptureTimeNs = -1L
     
-    // 🔥 关键修复：音频 PCM 采集的第一个时间戳（用于对齐音视频起点）
-    private var firstAudioPcmTimestampNs = -1L
-    
-    /**
-     * 去除 NAL 单元的起始码（00 00 00 01 或 00 00 01）
-     */
-    private fun stripStartCode(nal: ByteArray): ByteArray {
-        // 4 字节起始码 00 00 00 01
-        if (nal.size >= 4 && nal[0] == 0x00.toByte() && nal[1] == 0x00.toByte() &&
-            nal[2] == 0x00.toByte() && nal[3] == 0x01.toByte()) {
-            return nal.copyOfRange(4, nal.size)
-        }
-        // 3 字节起始码 00 00 01
-        if (nal.size >= 3 && nal[0] == 0x00.toByte() && nal[1] == 0x00.toByte() &&
-            nal[2] == 0x01.toByte()) {
-            return nal.copyOfRange(3, nal.size)
-        }
-        return nal
-    }
-    
-    /**
-     * 判断是否是 AnnexB 格式（支持 3 字节或 4 字节起始码）
-     */
-    private fun isAnnexB(data: ByteArray): Boolean {
-        if (data.size < 3) return false
-        
-        // 检查 4 字节起始码 00 00 00 01
-        if (data.size >= 4 && 
-            data[0] == 0x00.toByte() && data[1] == 0x00.toByte() &&
-            data[2] == 0x00.toByte() && data[3] == 0x01.toByte()) {
-            return true
-        }
-        
-        // 检查 3 字节起始码 00 00 01
-        if (data[0] == 0x00.toByte() && data[1] == 0x00.toByte() &&
-            data[2] == 0x01.toByte()) {
-            return true
-        }
-        
-        return false
-    }
-    
-    /**
-     * 将 AnnexB 格式转换为 AVCC 格式（增强版：支持混合起始码长度）
-     * AnnexB: 00 00 00 01 [NAL data] 或 00 00 01 [NAL data]
-     * AVCC: [4-byte length] [NAL data]
-     */
-    private fun annexBToAvcc(annexBData: ByteArray): ByteArray {
-        val output = java.io.ByteArrayOutputStream()
-        var i = 0
-        while (i < annexBData.size) {
-            // 查找起始码（支持 3 或 4 字节）
-            var startCodeLen = 0
-            if (i + 3 < annexBData.size &&
-                annexBData[i] == 0x00.toByte() && annexBData[i+1] == 0x00.toByte() &&
-                annexBData[i+2] == 0x00.toByte() && annexBData[i+3] == 0x01.toByte()) {
-                startCodeLen = 4
-            } else if (i + 2 < annexBData.size &&
-                annexBData[i] == 0x00.toByte() && annexBData[i+1] == 0x00.toByte() &&
-                annexBData[i+2] == 0x01.toByte()) {
-                startCodeLen = 3
-            }
-
-            if (startCodeLen > 0) {
-                i += startCodeLen
-                // 查找下一个起始码（3 或 4 字节）
-                var end = annexBData.size
-                var j = i
-                while (j < annexBData.size - 2) {
-                    if (annexBData[j] == 0x00.toByte() && annexBData[j+1] == 0x00.toByte()) {
-                        if (j+2 < annexBData.size && annexBData[j+2] == 0x01.toByte()) {
-                            end = j
-                            break
-                        }
-                        if (j+3 < annexBData.size && annexBData[j+2] == 0x00.toByte() && annexBData[j+3] == 0x01.toByte()) {
-                            end = j
-                            break
-                        }
-                    }
-                    j++
-                }
-                val naluLength = end - i
-                if (naluLength > 0) {
-                    // 写入 4 字节长度（大端）
-                    output.write((naluLength shr 24) and 0xFF)
-                    output.write((naluLength shr 16) and 0xFF)
-                    output.write((naluLength shr 8) and 0xFF)
-                    output.write(naluLength and 0xFF)
-                    // 写入 NAL 数据
-                    output.write(annexBData, i, naluLength)
-                }
-                i = end
-            } else {
-                i++
-            }
-        }
-        return output.toByteArray()
-    }
-    
-    /**
-     * 获取编码器的 input surface
-     */
-    fun getInputSurface(): Surface? {
-        val s = surface
-        if (s == null) {
-//            Log.w(TAG, "getInputSurface() returned null - surface is null")
-        } else {
-//            Log.d(TAG, "getInputSurface() returned valid surface: $s")
-        }
-        return s
-    }
-    
-    /**
-     * 开始编码和推流
-     */
-    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    fun start(rtmpUrl: String) {
+    override fun prepare() {
+        check(!isPrepared && !isEncoding) { "编码器已经准备或启动" }
         try {
 //            Log.d(TAG, "Starting encoder: ${width}x${height}, bitrate=$videoBitrate, fps=$frameRate")
             val encoderChoices = selectVideoEncoder(width, height, frameRate)
@@ -235,61 +118,26 @@ class SurfaceTextureEncoder(
             videoEncoderCandidates = encoderChoices
             val bestChoice = encoderChoices.first()
             selectedVideoEncoderName = bestChoice.codecName
-            effectiveVideoFrameRate = bestChoice.frameRate
-            if (effectiveVideoFrameRate < frameRate) {
-                onInfo?.invoke("当前分辨率不支持 ${frameRate}fps 编码，已自动降级为 ${effectiveVideoFrameRate}fps")
+            effectiveFrameRate = bestChoice.frameRate
+            if (effectiveFrameRate < frameRate) {
+                onInfo?.invoke("当前分辨率不支持 ${frameRate}fps 编码，已自动降级为 ${effectiveFrameRate}fps")
             }
             
-            // 1. 初始化 RTMP 推流器
-            rtmpPusher = RtmpPusher()
-            rtmpPusher?.setVideoParams(width, height, videoBitrate, effectiveVideoFrameRate)
-            rtmpPusher?.setAudioParams(audioSampleRate, audioChannelCount)
-            rtmpPusher?.setAudioEnabled(useAudio)
-            
-            // 在后台线程中连接，避免 NetworkOnMainThreadException
-            rtmpPusher?.onConnectionStateChanged = { isConnected ->
-//                Log.d(TAG, "RTMP connection state changed: $isConnected")
-                // 🔥 关键修复：将 RTMP 连接状态传递给上层推流状态
-                // 如果连接断开或失败，推流状态也应该为 false
-                if (!isConnected && isEncoding) {
-//                    Log.w(TAG, "RTMP disconnected while encoding, updating stream state to false")
-                    onStreamStateChanged?.invoke(false)
-                }
-            }
-            
-            // 阻塞等待RTMP连接成功
-            var rtmpConnected = false
-            var connectException: Exception? = null
-            val rtmpConnectThread = Thread {
-                try {
-                    rtmpPusher?.connect(rtmpUrl)
-                    rtmpConnected = true
-//                    Log.d(TAG, "RTMP connected successfully")
-                } catch (e: Exception) {
-//                    Log.e(TAG, "Failed to connect RTMP: ${e.message}")
-                    connectException = e
-                    onError?.invoke("RTMP连接失败：${e.message}")
-                }
-            }
-            rtmpConnectThread.start()
-            
-            // 等待RTMP连接（略长于 Socket.connect 的 10 秒超时）
-            rtmpConnectThread.join(12000)
-            
-            if (!rtmpConnected) {
-//                Log.w(TAG, "RTMP connection timeout or failed")
-                // 关键修复：连接超时或失败时，不应设置推流状态为 true
-                // 停止所有已初始化的资源
-                stop()
-                throw connectException ?: java.io.IOException("RTMP connection timeout")
-            }
-
             initVideoEncoder()
+            isPrepared = true
+        } catch (e: Exception) {
+            cleanupEncoderResources()
+            throw e
+        }
+    }
 
-            // 关键修复：记录统一的推流开始时间（纳秒）
-            streamStartTimeNs = System.nanoTime()
-//            Log.d(TAG, "🕒 Stream start time baseline: ${streamStartTimeNs}ns")
-
+    /** 开始编码。传输必须由会话层预先连接完成。 */
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    override fun start() {
+        check(!isEncoding) { "编码器已经启动" }
+        if (!isPrepared) prepare()
+        try {
+            mediaTimelineOriginNs = System.nanoTime()
             createVirtualDisplay()
             if (useAudio) {
                 initAudioEncoder()
@@ -297,30 +145,25 @@ class SurfaceTextureEncoder(
 
             isEncoding = true
             startEncodeThread()
-            onStreamStateChanged?.invoke(true)
-            
-//            Log.d(TAG, "Encoder started successfully")
-            
         } catch (e: Exception) {
-//            Log.e(TAG, "Failed to start encoder", e)
-            onError?.invoke("启动编码器失败：${e.message}")
-            cleanupEncoderResources(notifyState = true)
+            cleanupEncoderResources()
+            throw e
         }
     }
     
     /**
-     * 停止编码和推流
+     * 停止编码并释放 MediaCodec 资源
      */
-    fun stop() {
-        cleanupEncoderResources(notifyState = true)
+    override fun stop() {
+        cleanupEncoderResources()
     }
 
     private fun handleEncoderFailure(message: String) {
+        cleanupEncoderResources()
         onError?.invoke(message)
-        cleanupEncoderResources(notifyState = true)
     }
 
-    private fun cleanupEncoderResources(notifyState: Boolean) {
+    private fun cleanupEncoderResources() {
         synchronized(cleanupLock) {
             if (isCleaningUp) return
             isCleaningUp = true
@@ -334,19 +177,12 @@ class SurfaceTextureEncoder(
             stopAudioRecorder()
             releaseVideoEncoder()
 
-            try {
-                rtmpPusher?.disconnect()
-            } catch (e: Exception) {
-//                Log.w(TAG, "Error disconnecting RTMP pusher", e)
-            } finally {
-                rtmpPusher = null
-            }
-
             cachedAVCCConfig = null
             cachedAudioSpecificConfig = null
             selectedVideoEncoderName = null
             videoEncoderCandidates = null
-            effectiveVideoFrameRate = frameRate
+            effectiveFrameRate = frameRate
+            isPrepared = false
             videoOutputFrameCount = 0L
             videoOutputStartNs = 0L
             frameRateWindowStartNs = 0L
@@ -354,14 +190,12 @@ class SurfaceTextureEncoder(
             frameRateWindowFrameCount = 0
             actualFrameRateWarned = false
             spsPpsSent = false
-            initialVideoPtsUs = -1L
-            lastVideoTimestampMs = 0L
-            streamStartTimeNs = -1L
-            firstAudioPcmTimestampNs = -1L
-
-            if (notifyState) {
-                onStreamStateChanged?.invoke(false)
-            }
+            mediaTimelineOriginNs = 0L
+            audioPendingCaptureTimeNs = -1L
+            audioPendingBuffer.reset()
+            audioPendingOffset = 0
+            audioInputFrameCount = 0L
+            audioOutputFrameCount = 0L
 
 //            Log.d(TAG, "Encoder stopped")
         } finally {
@@ -372,16 +206,6 @@ class SurfaceTextureEncoder(
     }
     
     /**
-     * 切换推流地址（动态切换）
-     */
-    fun switchRtmpUrl(newUrl: String) {
-        rtmpPusher?.disconnect()
-        rtmpPusher = RtmpPusher()
-        rtmpPusher?.connect(newUrl)
-//        Log.d(TAG, "Switched to new RTMP URL: $newUrl")
-    }
-    
-    /**
      * 初始化视频编码器：按候选列表逐个尝试，configure/start 失败自动切下一个候选。
      *
      * 能力表在真机上不可靠：可能误报"不支持"（导致可用编码器被跳过），
@@ -389,9 +213,9 @@ class SurfaceTextureEncoder(
      * 只有全部候选都失败才抛出异常，交由上层降级/报错。
      */
     private fun initVideoEncoder() {
-        val announcedFps = effectiveVideoFrameRate
+        val announcedFps = effectiveFrameRate
         val choices = videoEncoderCandidates
-            ?: selectedVideoEncoderName?.let { listOf(VideoEncoderChoice(it, effectiveVideoFrameRate)) }
+            ?: selectedVideoEncoderName?.let { listOf(VideoEncoderChoice(it, effectiveFrameRate)) }
             ?: selectVideoEncoder(width, height, frameRate)
         if (choices.isEmpty()) {
             val encoderType = if (requireHardwareVideoEncoder) "硬件 H.264 视频编码器" else "H.264 视频编码器"
@@ -404,9 +228,9 @@ class SurfaceTextureEncoder(
                 tryInitVideoEncoder(choice.codecName, choice.frameRate)
                 // 初始化成功：记录实际使用的编码器和帧率
                 selectedVideoEncoderName = choice.codecName
-                effectiveVideoFrameRate = choice.frameRate
-                if (effectiveVideoFrameRate < announcedFps) {
-                    onInfo?.invoke("视频编码器降级：实际使用 ${effectiveVideoFrameRate}fps")
+                effectiveFrameRate = choice.frameRate
+                if (effectiveFrameRate < announcedFps) {
+                    onInfo?.invoke("视频编码器降级：实际使用 ${effectiveFrameRate}fps")
                 }
                 return
             } catch (e: Exception) {
@@ -431,17 +255,18 @@ class SurfaceTextureEncoder(
             setInteger(MediaFormat.KEY_COLOR_FORMAT, 
                 MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, iFrameInterval)
-            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
-            // 根据帧率+分辨率自动选择最小需要的 AVC Level，移掉硬编码的 Level 4 限制
-            // 1080p@120 → Level 5.1 | 4K@60 → Level 5.2 | 1080p@60 → Level 4.2
+            // Main 比 High 更容易被 Android 硬件编码器和 OBS/FFmpeg 组合稳定解码，
+            // 同时保留 CABAC，画质/码率损失小于强制 Baseline。
+            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileMain)
+            // 根据帧率+分辨率选择满足宏块率要求的 AVC Level。
             setInteger(MediaFormat.KEY_LEVEL, computeMinAvcLevel(width, height, fps))
             setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-            if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R)
-                setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+            repeatPreviousFrameAfterUs
+                ?.takeIf { it > 0L }
+                ?.let { setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, it) }
             setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
             
             if (videoMode == "CBR") {
-                setInteger(MediaFormat.KEY_COMPLEXITY, 0)
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             } else {
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CQ)
@@ -478,14 +303,14 @@ class SurfaceTextureEncoder(
 //                Log.d(TAG, "Found PPS in output format, size=${pps.size}")
                 
                 // 去除起始码
-                val strippedSps = stripStartCode(sps)
-                val strippedPps = stripStartCode(pps)
+                val strippedSps = H264Avcc.stripStartCode(sps)
+                val strippedPps = H264Avcc.stripStartCode(pps)
                 
 //                Log.d(TAG, "SPS: ${sps.size} bytes -> ${strippedSps.size} bytes (after stripping start code)")
 //                Log.d(TAG, "PPS: ${pps.size} bytes -> ${strippedPps.size} bytes (after stripping start code)")
                 
                 // 立即合并成完整的 AVCDecoderConfigurationRecord（使用去除起始码的数据）
-                val avccConfig = mergeSpsPpsToAVCC(strippedSps, strippedPps)
+                val avccConfig = H264Avcc.mergeParameterSets(strippedSps, strippedPps)
 //                Log.d(TAG, "Merged AVCC config size=${avccConfig.size}, preview: ${avccConfig.take(20).joinToString(" ") { "%02X".format(it) }}")
                 
                 // 保存到字段，等待 codec config flag 时再发送（双保险）
@@ -527,7 +352,7 @@ class SurfaceTextureEncoder(
                 setInteger(MediaFormat.KEY_BIT_RATE, audioBitrate)
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
                 // 🔥 关键修复：明确设置为非 ADTS 格式（裸 AAC ES 流）
-                // RTMP/FLV 规范要求 AAC raw frame 必须是纯 ES 流，不带 ADTS 头
+                // 输出统一采用不带 ADTS 头的 AAC ES，具体封装由传输层完成
                 // 参考：https://www.cnblogs.com/8335IT/p/18208384
                 setInteger(MediaFormat.KEY_IS_ADTS, 0) // 0=false, 输出裸 AAC ES 流
 //                Log.d("AudioCapture", "🎼 [INIT] Audio encoder format: KEY_IS_ADTS=0 (RAW AAC ES, no ADTS header)")
@@ -583,66 +408,6 @@ class SurfaceTextureEncoder(
     }
     
     /**
-     * 在启动后尽快尝试提取 ASC（避免 CODEC_CONFIG 丢失）
-     */
-    fun tryExtractAudioASCEarly() {
-        if (mediaCodecAudio == null) {
-//            Log.w(TAG, "Cannot extract ASC - audio encoder not initialized")
-            return
-        }
-        
-        try {
-            // 非阻塞尝试获取输出
-            val outputBufferIndex = mediaCodecAudio!!.dequeueOutputBuffer(audioBufferInfo!!, 0)
-            
-            if (outputBufferIndex >= 0 && (audioBufferInfo!!.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                val currentFormat = mediaCodecAudio!!.outputFormat
-                val csd0Buffer = currentFormat.getByteBuffer("csd-0")
-                
-                if (csd0Buffer != null) {
-                    csd0Buffer.rewind()
-                    val asc = ByteArray(csd0Buffer.remaining())
-                    csd0Buffer.get(asc)
-                    
-                    cachedAudioSpecificConfig = asc
-//                    Log.d("AudioCapture", "✅ [EARLY] Extracted ASC: ${asc.size} bytes, ${asc.joinToString(" ") { "%02X".format(it) }}")
-                    
-                    // 🔥 关键修复：改用 setAudioSpecificConfigAndSend 来立即发送 Sequence Header
-                    rtmpPusher?.setAudioSpecificConfigAndSend(asc)
-//                    Log.d("AudioCapture", "📤 [EARLY] AAC Sequence Header sent!")
-                }
-                
-                mediaCodecAudio!!.releaseOutputBuffer(outputBufferIndex, false)
-            }
-        } catch (e: Exception) {
-            // 不关键，继续
-        }
-    }
-    
-    /**
-     * 旧的 AudioRecord 初始化方法（保留备用）
-     */
-    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    private fun initAudioRecorder() {
-        try {
-            val channelConfig = if (audioChannelCount == 2) {
-                AudioFormat.CHANNEL_IN_STEREO
-            } else {
-                AudioFormat.CHANNEL_IN_MONO
-            }
-            
-            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-            val bufferSize = AudioRecord.getMinBufferSize(audioSampleRate, channelConfig, audioFormat)
-            
-            // 不再使用 AudioRecord，改用 MediaCodec
-//            Log.d(TAG, "Using MediaCodec AAC encoder instead of AudioRecord")
-            
-        } catch (e: Exception) {
-//            Log.e(TAG, "Failed to initialize audio recorder", e)
-        }
-    }
-    
-    /**
      * 启动编码线程
      */
     private fun startEncodeThread() {
@@ -655,7 +420,7 @@ class SurfaceTextureEncoder(
             
             encodeVideoLoop()
             
-        }, "SurfaceTextureEncoder-EncodeThread")
+        }, "MediaCodecEncoder-EncodeThread")
         
         encodeThread?.start()
 //        Log.d(TAG, "Encode thread started")
@@ -789,11 +554,6 @@ class SurfaceTextureEncoder(
      * 视频编码循环
      */
     private var spsPpsSent = false  // 标记是否已发送 SPS/PPS
-    private var initialVideoPtsUs = -1L // 第一个视频帧的时间戳（用于计算相对时间）
-    
-    // 🔥 关键修复：视频时间戳必须独立维护，保证单调递增
-    // RTMP 协议要求：音频流、视频流各自单调递增，混合流也应单调递增
-    private var lastVideoTimestampMs = 0L // 上一个视频帧的时间戳
     private var videoOutputFrameCount = 0L
     private var videoOutputStartNs = 0L
     private var frameRateWindowStartNs = 0L
@@ -811,9 +571,29 @@ class SurfaceTextureEncoder(
         val watchdogStartNs = System.nanoTime()
         var sawFirstOutput = false
         val watchdogTimeoutMs = 5000L
+        // 部分厂商的 Surface 编码器会在画面变化很小时忽略 KEY_I_FRAME_INTERVAL，
+        // 导致录屏流长期没有新的随机访问点。录屏启用了重复帧时，按既定的
+        // I 帧间隔主动请求同步帧，既限制最坏刷新时间，也方便中途拉流和回放截取。
+        val syncFrameIntervalNs = iFrameInterval.coerceAtLeast(1) * 1_000_000_000L
+        var nextSyncFrameRequestNs = watchdogStartNs + syncFrameIntervalNs
         
         while (!Thread.interrupted() && isEncoding) {
             try {
+                if (repeatPreviousFrameAfterUs != null) {
+                    val nowNs = System.nanoTime()
+                    if (nowNs >= nextSyncFrameRequestNs) {
+                        try {
+                            mediaCodecVideo?.setParameters(Bundle().apply {
+                                putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                            })
+                        } catch (_: RuntimeException) {
+                            // 厂商编码器不支持动态同步帧，或已在并发停止时，
+                            // 继续依赖格式中的 I 帧间隔，不让可选优化中断推流。
+                        }
+                        nextSyncFrameRequestNs = nowNs + syncFrameIntervalNs
+                    }
+                }
+
                 // 1. 从编码器获取输出 buffer
                 val outputBufferIndex = mediaCodecVideo?.dequeueOutputBuffer(videoBufferInfo!!, 10000)
                     ?: continue
@@ -844,15 +624,15 @@ class SurfaceTextureEncoder(
 //                                Log.d(TAG, "Raw PPS preview: ${pps.take(10).joinToString(" ") { "%02X".format(it) }}")
                                                         
                                 // 去除起始码
-                                val strippedSps = stripStartCode(sps)
-                                val strippedPps = stripStartCode(pps)
+                                val strippedSps = H264Avcc.stripStartCode(sps)
+                                val strippedPps = H264Avcc.stripStartCode(pps)
                                                         
 //                                Log.d(TAG, "Stripped SPS size: ${strippedSps.size}, Stripped PPS size: ${strippedPps.size}")
 //                                Log.d(TAG, "Stripped SPS preview: ${strippedSps.take(10).joinToString(" ") { "%02X".format(it) }}")
 //                                Log.d(TAG, "Stripped PPS preview: ${strippedPps.take(10).joinToString(" ") { "%02X".format(it) }}")
                                                         
                                 // 合并成 AVCC 格式（使用去除起始码的数据）
-                                val avccConfig = mergeSpsPpsToAVCC(strippedSps, strippedPps)
+                                val avccConfig = H264Avcc.mergeParameterSets(strippedSps, strippedPps)
                                 cachedAVCCConfig = avccConfig
 //                                Log.d(TAG, "Created AVCC config from output format, size=${avccConfig.size}")
                                                         
@@ -860,9 +640,9 @@ class SurfaceTextureEncoder(
                                 val hexPreview = avccConfig.take(20).joinToString(" ") { "%02X".format(it) }
 //                                Log.d(TAG, "AVCC config preview: $hexPreview")
                                                         
-                                // 立即发送 SPS/PPS(RTMP Sequence Header)
-                                if (!spsPpsSent && rtmpPusher != null) {
-                                    rtmpPusher!!.sendVideoSpsPps(avccConfig)
+                                // 立即发送视频解码配置
+                                if (!spsPpsSent) {
+                                    output.sendVideoConfig(VideoCodecConfig(avccConfig))
                                     spsPpsSent = true
 //                                    Log.d(TAG, "✓✓✓ Video Sequence Header sent successfully from INFO_OUTPUT_FORMAT_CHANGED! ✓✓✓")
                                 }
@@ -913,7 +693,7 @@ class SurfaceTextureEncoder(
                 ) {
                     handleEncoderFailure(
                         "视频编码器启动后 ${watchdogTimeoutMs / 1000} 秒无输出，" +
-                            "设备可能不支持 ${width}x${height}@${effectiveVideoFrameRate}fps，请降低分辨率或帧率"
+                            "设备可能不支持 ${width}x${height}@${effectiveFrameRate}fps，请降低分辨率或帧率"
                     )
                     break
                 }
@@ -937,13 +717,6 @@ class SurfaceTextureEncoder(
      * 处理视频编码数据
      */
     private fun processVideoData(data: ByteArray, bufferInfo: MediaCodec.BufferInfo) {
-        // 在发送前确保 RTMP 已初始化
-        val pusher = rtmpPusher
-        if (pusher == null) {
-//            Log.w(TAG, "RTMP Pusher not initialized, dropping frame")
-            return
-        }
-        
         try {
             // 检查是否是 codec config 数据（包含 SPS/PPS）
             if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
@@ -959,7 +732,7 @@ class SurfaceTextureEncoder(
                     val avccConfig = cachedAVCCConfig
                     if (avccConfig != null) {
 //                        Log.d(TAG, "Using cached AVCC config from csd-0/csd-1, size=${avccConfig.size}")
-                        pusher.sendVideoSpsPps(avccConfig)
+                        output.sendVideoConfig(VideoCodecConfig(avccConfig))
                         spsPpsSent = true
 //                        Log.d(TAG, "SPS/PPS sent successfully using cached AVCC config!")
                     } else {
@@ -1012,8 +785,8 @@ class SurfaceTextureEncoder(
                             if (nalUnits.size >= 2) {
                                 val sps = nalUnits.first()
                                 val pps = nalUnits.last()
-                                val avccFromAnnexB = mergeSpsPpsToAVCC(sps, pps)
-                                pusher.sendVideoSpsPps(avccFromAnnexB)
+                                val avccFromAnnexB = H264Avcc.mergeParameterSets(sps, pps)
+                                output.sendVideoConfig(VideoCodecConfig(avccFromAnnexB))
                                 spsPpsSent = true
 //                                Log.d(TAG, "SPS/PPS extracted from AnnexB and sent!")
                             } else {
@@ -1030,34 +803,12 @@ class SurfaceTextureEncoder(
             }
             
             // 检查是否是关键帧
-            val isKeyFrame = bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
+            val codecMarkedKeyFrame = bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
             
-            // 🔥 关键修复：视频时间戳使用 MediaCodec 的 presentationTimeUs（monotonic clock）
-            // 协议依据：OBS/FFmpeg 标准做法 - 视频帧使用系统单调时钟，而非固定增量
-            // 优势：
-            //   1. 反映实际编码时间，不受帧率波动影响
-            //   2. MediaCodec 内部已保证单调递增
-            //   3. 与音频的固定增量模式形成互补，播放器可正确同步
-            
-            val presentationTimeMs = if (initialVideoPtsUs == -1L) {
-                // 第一帧：初始化基准
-                initialVideoPtsUs = bufferInfo.presentationTimeUs
-//                Log.d(TAG, "📊 Initial video PTS: $initialVideoPtsUs us")
-                0L
-            } else {
-                // 后续帧：计算相对于第一帧的时间（微秒 → 毫秒）
-                val relativePtsUs = bufferInfo.presentationTimeUs - initialVideoPtsUs
-                val timestampMs = relativePtsUs / 1000
-                
-                // 🔥 防御性检查：确保单调递增（理论上 MediaCodec 已保证）
-                if (timestampMs <= lastVideoTimestampMs) {
-                    // 异常情况：时间戳倒退，使用上一个 + 1ms
-//                    Log.w(TAG, "⚠️ Video timestamp would go backwards! Corrected from $timestampMs to ${lastVideoTimestampMs + 1}")
-                    lastVideoTimestampMs + 1
-                } else {
-                    timestampMs
-                }.also { lastVideoTimestampMs = it }
-            }
+            // Surface 输入帧的 PTS 与 System.nanoTime() 同属单调时钟域。
+            // 保留 MediaCodec 的微秒精度，不在编码端伪造递增时间戳。
+            val captureTimeNs = bufferInfo.presentationTimeUs * 1_000L
+            val presentationTimeUs = (captureTimeNs - mediaTimelineOriginNs) / 1_000L
 
             val outputTimeNs = System.nanoTime()
             if (videoOutputStartNs == 0L) videoOutputStartNs = outputTimeNs
@@ -1083,8 +834,8 @@ class SurfaceTextureEncoder(
                 Log.i(
                     TAG,
                     "编码输出统计: frames=$videoOutputFrameCount, requested=${frameRate}fps, " +
-                        "effective=${effectiveVideoFrameRate}fps, wallFps=${"%.1f".format(wallFps)}, " +
-                        "ptsFps=${"%.1f".format(ptsFps)}, lastPts=${presentationTimeMs}ms"
+                        "effective=${effectiveFrameRate}fps, wallFps=${"%.1f".format(wallFps)}, " +
+                        "ptsFps=${"%.1f".format(ptsFps)}, lastPts=${presentationTimeUs}us"
                 )
                 onVideoFrameRateMeasured?.invoke(
                     VideoFrameRateDiagnostics(
@@ -1110,7 +861,7 @@ class SurfaceTextureEncoder(
                 frameRateWindowFrameCount = 1
             }
             
-//            Log.d(TAG, "🎬 Video frame: key=$isKeyFrame, ts=$presentationTimeMs ms (pts=${bufferInfo.presentationTimeUs}us)")
+//            Log.d(TAG, "🎬 Video frame: key=$isKeyFrame, pts=${presentationTimeUs}us")
             
             // 发送视频数据（带错误检查和格式转换）
             try {
@@ -1121,11 +872,11 @@ class SurfaceTextureEncoder(
                     // Log.d(TAG, "Frame start bytes: $hex")
                     
                     // 判断是否是 AnnexB 格式
-                    if (isAnnexB(data)) {
+                    if (H264Avcc.isAnnexB(data)) {
                         // 检查是 3 字节还是 4 字节起始码
                         val startCodeSize = if (data[2] == 0x00.toByte()) 4 else 3
 //                        Log.w(TAG, "WARNING: Frame is in AnnexB format (${startCodeSize}-byte start code)! Converting to AVCC...")
-                        annexBToAvcc(data)
+                        H264Avcc.annexBToAvcc(data)
                     } else {
 //                        Log.v(TAG, "Frame appears to be in AVCC format, sending directly")
                         data
@@ -1133,12 +884,21 @@ class SurfaceTextureEncoder(
                 } else {
                     data
                 }
+                // 某些厂商编码器的 BufferInfo 标记不完整；真实 IDR 仍须作为
+                // 关键帧可靠发送，接收端也会再次按 NAL 类型校验回放边界。
+                val isKeyFrame = codecMarkedKeyFrame || H264Avcc.containsIdr(frameData)
                 
-                pusher.sendVideoData(frameData, presentationTimeMs, isKeyFrame)
+                output.sendVideoFrame(EncodedVideoFrame(
+                    data = frameData,
+                    presentationTimeUs = presentationTimeUs,
+                    isKeyFrame = isKeyFrame,
+                    captureTimeNs = captureTimeNs,
+                    encodedTimeNs = outputTimeNs
+                ))
                 
                 // 🔥 性能优化：移除高频诊断日志，仅在关键帧打印
                 if (isKeyFrame) {
-//                    Log.d(TAG, "Sent key frame, size=${frameData.size}, pts=${presentationTimeMs}ms")
+//                    Log.d(TAG, "Sent key frame, size=${frameData.size}, pts=${presentationTimeUs}us")
                 } else {
                     // Log.v(TAG, "Sent video frame, size=${frameData.size}, pts=${presentationTimeMs}ms")
                 }
@@ -1156,14 +916,13 @@ class SurfaceTextureEncoder(
      */
     private fun startAudioRecording() {
         isAudioRecording = true
-        audioLastOutputTimeMs = 0.0
         // ASC 会在首次提交 PCM 后由 MediaCodec 自然输出。
     }
 
     /**
      * 提交外部 PCM 数据到音频编码器
      */
-    fun submitExternalAudioData(pcmData: ByteArray, size: Int, timestampNs: Long) {
+    override fun submitExternalAudioData(pcmData: ByteArray, size: Int, timestampNs: Long) {
         if (!isEncoding || !isAudioRecording || mediaCodecAudio == null || size <= 0) {
             return
         }
@@ -1194,10 +953,10 @@ class SurfaceTextureEncoder(
     }
     
     /**
-     * 将 PCM 数据编码为 AAC 并发送到 RTMP
+     * 将 PCM 数据编码为 AAC 并交给媒体输出端
      * 
      * 🔥 协议依据：
-     * 1. RTMP/FLV 规范：AAC Sequence Header + AAC Raw Frame
+     * 1. 输出 AudioSpecificConfig + AAC Raw Frame
      * 2. Android MediaCodec 官方文档：CODEC_CONFIG buffer 必须在普通数据之前处理
      * 3. 时间戳规范：音视频必须使用同一系统时间基准
      * 
@@ -1208,8 +967,6 @@ class SurfaceTextureEncoder(
      */
     private var audioInputFrameCount = 0L
     private var audioOutputFrameCount = 0L
-    private var audioTotalSamplesQueued = 0L // 已输入编码器的总采样数
-    
     private fun encodeAndSendAudioData(pcmData: ByteArray, pcmTimestampNs: Long) {
         if (mediaCodecAudio == null) {
 //            Log.w(TAG, "❌ Audio encoder not initialized!")
@@ -1290,11 +1047,7 @@ class SurfaceTextureEncoder(
                                 cachedAudioSpecificConfig = asc
 //                                Log.d("AudioEncode", "✅ Extracted ASC: ${asc.size} bytes, ${asc.joinToString(" ") { "%02X".format(it) }}")
                                 
-                                // 🔥 立即发送到 RTMP - 不要等第一个数据帧！
-                                if (rtmpPusher != null) {
-                                    rtmpPusher!!.setAudioSpecificConfigAndSend(asc)
-//                                    Log.d("AudioEncode", "📤 AAC Sequence Header sent immediately!")
-                                }
+                                output.sendAudioConfig(AudioCodecConfig(asc))
                             } else {
 //                                Log.d("AudioEncode", "⚠️ ASC already set, ignoring duplicate CODEC_CONFIG")
                             }
@@ -1321,25 +1074,33 @@ class SurfaceTextureEncoder(
                         
                         // 🔥 关键修复：使用 MediaCodec 输出的 presentationTimeUs（已在输入时设置为 PCM 硬件时间戳）
                         // 这样保证音频时间戳源自采集时的硬件时钟，而非系统时间
-                        val timestampMs = bufferInfo.presentationTimeUs / 1000L
+                        val presentationTimeUs = bufferInfo.presentationTimeUs
                         
                         // 🔥 诊断日志（降低频率）
                         if (audioOutputFrameCount % 50 == 0L) {
-//                            Log.d("AudioEncode", "📤 [Frame #$audioOutputFrameCount] AAC frame: size=${aacData.size}, ts=$timestampMs ms (from pts=${bufferInfo.presentationTimeUs}us)")
+//                            Log.d("AudioEncode", "📤 [Frame #$audioOutputFrameCount] AAC frame: size=${aacData.size}, pts=${presentationTimeUs}us")
                         }
-                        
-                        if (rtmpPusher != null) {
-                            rtmpPusher!!.sendAudioData(aacData, timestampMs.toLong())
-                            audioOutputFrameCount++
-                            
-                            if (audioOutputFrameCount % 100 == 0L) {
-//                                Log.d("AudioEncode", "📤 Sent AAC frame #$audioOutputFrameCount: size=${aacData.size}, ts=$timestampMs ms")
-                            }
+
+                        val captureTimeNs = if (mediaTimelineOriginNs > 0L) {
+                            mediaTimelineOriginNs + bufferInfo.presentationTimeUs * 1_000L
                         } else {
-//                            Log.w("AudioEncode", "⚠️ RtmpPusher not available, dropping AAC frame")
+                            System.nanoTime()
+                        }
+                        output.sendAudioFrame(
+                            EncodedAudioFrame(
+                                data = aacData,
+                                presentationTimeUs = presentationTimeUs,
+                                captureTimeNs = captureTimeNs,
+                                encodedTimeNs = System.nanoTime()
+                            )
+                        )
+                        audioOutputFrameCount++
+
+                        if (audioOutputFrameCount % 100 == 0L) {
+//                            Log.d("AudioEncode", "📤 Sent AAC frame #$audioOutputFrameCount: size=${aacData.size}, pts=${presentationTimeUs}us")
                         }
                     }
-                    
+
                     mediaCodecAudio!!.releaseOutputBuffer(outputBufferIndex, false)
                     drainedCount++
                 }
@@ -1366,20 +1127,8 @@ class SurfaceTextureEncoder(
      */
     private var audioPendingBuffer = ByteArrayOutputStream() // 缓存未完成的 PCM 数据
     private val AAC_FRAME_SIZE = 1024 * audioChannelCount * 2 // 4096 bytes @48kHz stereo
-    private var audioLastInputTimeUs = 0L // 上一个输入帧的时间戳（微秒）
-    
-    // 🔥 音频输出时间戳：使用 Double 累加避免整数除法精度丢失
-    private var audioLastOutputTimeMs = 0.0 // 理论累加时间戳（毫秒）
-    
-    // 🔥 关键修复：音频时间戳校准机制
-    private var audioFirstOutputRealtimeMs = -1L // 第一帧音频输出时的系统时间
-    private var audioCalibrationFrameCount = 0L // 用于定期校准的帧计数
-    
     private val AUDIO_SAMPLES_PER_FRAME = 1024 // AAC 每帧 1024 个采样点
     private var audioPendingOffset = 0 // 🔥 待处理缓冲区的起始偏移量
-    
-    // 🔥 新增：保存当前 PCM 包的时间戳，用于推算 AAC 帧时间戳
-    private var currentPcmTimestampNs = 0L
     
     private fun queueAudioInputData(pcmData: ByteArray, pcmTimestampNs: Long) {
         if (mediaCodecAudio == null) {
@@ -1387,15 +1136,6 @@ class SurfaceTextureEncoder(
             return
         }
         
-        // 🔥 关键修复：记录第一个 PCM 时间戳作为音频起点基准
-        if (firstAudioPcmTimestampNs == -1L) {
-            firstAudioPcmTimestampNs = pcmTimestampNs
-//            Log.d("AudioEncode", "🎯 First audio PCM timestamp recorded: $pcmTimestampNs ns")
-        }
-        
-        // 🔥 保存 PCM 时间戳，用于后续推算 AAC 帧时间戳
-        currentPcmTimestampNs = pcmTimestampNs
-
         // 🔥 关键修复：检查编码器状态（降低日志频率）
         if (audioInputFrameCount % 100 == 0L) {
             try {
@@ -1408,32 +1148,44 @@ class SurfaceTextureEncoder(
             }
         }
         
+        val bytesPerPcmFrame = audioChannelCount * 2
+        val pendingBytes = audioPendingBuffer.size() - audioPendingOffset
+        if (audioPendingCaptureTimeNs < 0L || pendingBytes == 0) {
+            audioPendingCaptureTimeNs = pcmTimestampNs
+        } else {
+            val expectedPacketTimeNs = audioPendingCaptureTimeNs +
+                (pendingBytes / bytesPerPcmFrame) * 1_000_000_000L / audioSampleRate
+            val clockErrorNs = pcmTimestampNs - expectedPacketTimeNs
+            if (clockErrorNs !in -100_000_000L..100_000_000L) {
+                // 采集暂停或时钟跳变时丢弃不足一帧的旧 PCM，避免声音拖尾。
+                audioPendingBuffer.reset()
+                audioPendingOffset = 0
+                audioPendingCaptureTimeNs = pcmTimestampNs
+            }
+        }
+
         // 🔥 关键：将新数据添加到待处理缓冲区
         audioPendingBuffer.write(pcmData)
         
         // 🔥 循环提交完整的 AAC 帧（使用偏移量避免重复复制）
-        var frameIndex = 0 // 🔥 当前 PCM 包中的第几帧
         while (audioPendingBuffer.size() - audioPendingOffset >= AAC_FRAME_SIZE) {
             // 🔥 性能优化：直接获取内部数组，避免 toByteArray() 复制
             val allData = audioPendingBuffer.toByteArray()
             val frameData = allData.copyOfRange(audioPendingOffset, audioPendingOffset + AAC_FRAME_SIZE)
             
-            // 🔥 移动偏移量，指向下一帧的起始位置
-            audioPendingOffset += AAC_FRAME_SIZE
-            
             // 🔥 推算当前 AAC 帧的时间戳
             // 原理：PCM 包中有多个 AAC 帧，每帧间隔固定时间
-            // 🔥 关键修复：使用相对于第一个 PCM 时间戳的偏移，与视频时间戳起点对齐
             val timeIncrementPerFrameNs = (AUDIO_SAMPLES_PER_FRAME * 1_000_000_000L) / audioSampleRate
-            val absoluteFrameTimestampNs = pcmTimestampNs + (frameIndex * timeIncrementPerFrameNs)
+            val absoluteFrameTimestampNs = audioPendingCaptureTimeNs
 
-            // 转换为相对于推流开始的时间（微秒）
-            val relativeFrameTimestampNs = absoluteFrameTimestampNs - firstAudioPcmTimestampNs
-            val frameTimestampUs = relativeFrameTimestampNs / 1000L  // 纳秒 → 微秒
-            frameIndex++
-            
+            // 音频与视频使用同一个推流时钟原点。
+            val relativeFrameTimestampNs = absoluteFrameTimestampNs - mediaTimelineOriginNs
+            val frameTimestampUs = relativeFrameTimestampNs / 1_000L
             // 提交单个完整帧到编码器（带时间戳，单位：微秒）
-            submitAudioFrameToEncoder(frameData, frameTimestampUs)
+            if (!submitAudioFrameToEncoder(frameData, frameTimestampUs)) break
+            // 只有 MediaCodec 真正接收后才消费缓存；输入缓冲区暂时满时下次重试。
+            audioPendingOffset += AAC_FRAME_SIZE
+            audioPendingCaptureTimeNs += timeIncrementPerFrameNs
         }
         
         // 🔥 关键优化：当已处理的数据足够多时，压缩缓冲区（只复制一次剩余数据）
@@ -1462,7 +1214,7 @@ class SurfaceTextureEncoder(
     /**
      * 提交单个 AAC 帧到编码器
      */
-    private fun submitAudioFrameToEncoder(frameData: ByteArray, frameTimestampUs: Long) {
+    private fun submitAudioFrameToEncoder(frameData: ByteArray, frameTimestampUs: Long): Boolean {
         // 尝试获取输入缓冲区
         val inputBufferIndex = mediaCodecAudio!!.dequeueInputBuffer(0)  // 非阻塞
         
@@ -1472,14 +1224,14 @@ class SurfaceTextureEncoder(
 //                Log.v("AudioEncode", "⚠️ Input buffer full, queued frames: $audioInputFrameCount, output frames: $audioOutputFrameCount, pending: ${audioPendingBuffer.size()} bytes")
             }
             // 🔥 关键：数据已经在 audioPendingBuffer 中，下次会自动重试
-            return
+            return false
         }
         
         try {
             val inputBuffer = mediaCodecAudio!!.getInputBuffer(inputBufferIndex)
             if (inputBuffer == null) {
 //                Log.w("AudioEncode", "⚠️ Failed to get input buffer at index $inputBufferIndex")
-                return
+                return false
             }
             
             inputBuffer.clear()
@@ -1509,9 +1261,10 @@ class SurfaceTextureEncoder(
             if (audioInputFrameCount % 100 == 0L) {
 //                Log.d("AudioEncode", "📥 Queued PCM frame #$audioInputFrameCount: size=${frameData.size}, ts=${presentationTimeUs}us (from PCM ts=$frameTimestampNs ns)")
             }
-            
+            return true
         } catch (e: Exception) {
 //            Log.e("AudioEncode", "❌ Error queuing audio input: ${e.message}")
+            return false
         }
     }
     
@@ -1537,33 +1290,6 @@ class SurfaceTextureEncoder(
     /**
      * 获取编码器状态
      */
-    fun isRunning(): Boolean = isEncoding
+    override fun isRunning(): Boolean = isEncoding
     
-    /**
-     * 获取当前推流地址
-     */
-    fun getCurrentRtmpUrl(): String? = rtmpPusher?.getCurrentUrl()
-    
-    /**
-     * 合并 SPS 和 PPS 成标准的 AVCDecoderConfigurationRecord (AVCC 格式)
-     */
-    private fun mergeSpsPpsToAVCC(sps: ByteArray, pps: ByteArray): ByteArray {
-        // AVCDecoderConfigurationRecord 结构：
-        // version(1) + profile/level(3) + lengthSizeMinusOne(1) + numOfSPS(1) + spsSize(2) + sps + numOfPPS(1) + ppsSize(2) + pps
-        val config = ByteBuffer.allocate(11 + sps.size + pps.size).apply {
-            order(ByteOrder.BIG_ENDIAN)
-            put(0x01.toByte()) // configurationVersion = 1
-            put(sps[1]) // AVCProfileIndication
-            put(sps[2]) // profile_compatibility
-            put(sps[3]) // AVCLevelIndication
-            put(0xFF.toByte()) // 6 bits reserved (111111) + 2 bits lengthSizeMinusOne (11 = 4 bytes)
-            put(0xE1.toByte()) // 3 bits reserved (111) + 5 bits numOfSequenceParameterSets (00001 = 1)
-            putShort(sps.size.toShort()) // sequenceParameterSetLength
-            put(sps) // sequenceParameterSetNALUnit
-            put(0x01.toByte()) // numOfPictureParameterSets (1)
-            putShort(pps.size.toShort()) // pictureParameterSetLength
-            put(pps) // pictureParameterSetNALUnit
-        }
-        return config.array()
-    }
 }

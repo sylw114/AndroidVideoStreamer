@@ -1487,7 +1487,7 @@ class RtmpPusher {
         // RTMP 协议允许时间戳回绕，播放器会使用 RFC1982 算法处理
         val timestamp = ts.coerceAtLeast(0L)
         
-        // 🔥 移除单调性检查：SurfaceTextureEncoder 已经保证时间戳单调递增
+        // MediaCodecEncoder 已经保证时间戳单调递增
         // 如果在这里强制修正，会导致累积误差，使音频时间戳超前
         
         // 🔥 协议依据：RTMP/FLV 规范 v10 - AAC 的 SoundFormat/SoundRate/SoundSize/SoundType 必须固定

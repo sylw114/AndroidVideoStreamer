@@ -30,7 +30,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.dpdns.sylw.videostreamer.udpAudio.AudioTransportProtocol
 import org.dpdns.sylw.videostreamer.udpAudio.OpusFrameDurationResolver
+import java.net.URI
 
 val Context.dataStore by preferencesDataStore("settings")
 
@@ -62,6 +64,8 @@ object StreamConfig {
     fun setTcpControlPort(v: Int?) { state["tcpPort"] = v }
     fun getUdpAudioPort(): Int? = state["udpPort"] as? Int
     fun setUdpAudioPort(v: Int?) { state["udpPort"] = v }
+    fun getAudioTransport(): String? = state["audioTransport"] as? String
+    fun setAudioTransport(v: String?) { state["audioTransport"] = v }
     fun getUdpAudioRedundant(): Boolean? = state["redundant"] as? Boolean
     fun setUdpAudioRedundant(v: Boolean?) { state["redundant"] = v }
     fun getUdpAudioOpusEnabled(): Boolean? = state["udpOpusEnabled"] as? Boolean
@@ -76,6 +80,29 @@ object StreamConfig {
     fun setAppLanguage(v: String?) { state["language"] = v }
 }
 
+fun expectedStreamingScheme(protocol: String?): String = when (protocol?.uppercase()) {
+    "QUIC" -> "quic"
+    "UDP" -> "udp"
+    else -> "rtmp"
+}
+
+fun switchStreamingUrlProtocol(url: String, protocol: String?): String {
+    val normalizedUrl = url.trim()
+        .replace('：', ':')
+        .replace('／', '/')
+    val schemeEnd = normalizedUrl.indexOf("://")
+    if (schemeEnd <= 0) return url
+    return expectedStreamingScheme(protocol) + normalizedUrl.substring(schemeEnd)
+}
+
+fun isValidStreamingUrl(url: String, protocol: String?): Boolean = runCatching {
+    val uri = URI(url)
+    val scheme = expectedStreamingScheme(protocol)
+    uri.scheme.equals(scheme, ignoreCase = true) &&
+        !uri.host.isNullOrBlank() &&
+        (scheme == "rtmp" || uri.port in 1..65535)
+}.getOrDefault(false)
+
 private val PREF_STREAM_URL = stringPreferencesKey("stream_url")
 private val PREF_VIDEO_BITRATE = intPreferencesKey("video_bitrate")
 private val PREF_FRAME_RATE = intPreferencesKey("frame_rate")
@@ -85,6 +112,7 @@ private val PREF_VIDEO_QUALITY = intPreferencesKey("video_quality")
 private val PREF_UDP_AUDIO_IP = stringPreferencesKey("udp_audio_ip")
 private val PREF_TCP_CONTROL_PORT = intPreferencesKey("tcp_control_port")
 private val PREF_UDP_AUDIO_PORT = intPreferencesKey("udp_audio_port")
+private val PREF_AUDIO_TRANSPORT = stringPreferencesKey("audio_transport")
 private val PREF_UDP_AUDIO_REDUNDANT = booleanPreferencesKey("udp_audio_redundant")
 private val PREF_UDP_AUDIO_OPUS_ENABLED = booleanPreferencesKey("udp_audio_opus_enabled")
 private val PREF_UDP_AUDIO_OPUS_BITRATE = intPreferencesKey("udp_audio_opus_bitrate")
@@ -109,14 +137,16 @@ suspend fun saveTcpControlPort(context: Context, port: Int) = prefSave(context, 
 suspend fun loadTcpControlPort(context: Context): Int = prefLoad(context, PREF_TCP_CONTROL_PORT, 9000)
 suspend fun saveUdpAudioPort(context: Context, port: Int) = prefSave(context, PREF_UDP_AUDIO_PORT, port)
 suspend fun loadUdpAudioUdpPort(context: Context): Int = prefLoad(context, PREF_UDP_AUDIO_PORT, 9000)
+suspend fun saveAudioTransport(context: Context, protocol: String) = prefSave(context, PREF_AUDIO_TRANSPORT, protocol)
+suspend fun loadAudioTransport(context: Context): String = prefLoad(context, PREF_AUDIO_TRANSPORT, AudioTransportProtocol.QUIC.name)
 suspend fun saveUdpAudioRedundant(context: Context, enabled: Boolean) = prefSave(context, PREF_UDP_AUDIO_REDUNDANT, enabled)
 suspend fun loadUdpAudioRedundant(context: Context): Boolean = prefLoad(context, PREF_UDP_AUDIO_REDUNDANT, false)
 suspend fun saveUdpAudioOpusEnabled(context: Context, enabled: Boolean) = prefSave(context, PREF_UDP_AUDIO_OPUS_ENABLED, enabled)
-suspend fun loadUdpAudioOpusEnabled(context: Context): Boolean = prefLoad(context, PREF_UDP_AUDIO_OPUS_ENABLED, false)
+suspend fun loadUdpAudioOpusEnabled(context: Context): Boolean = prefLoad(context, PREF_UDP_AUDIO_OPUS_ENABLED, true)
 suspend fun saveUdpAudioOpusBitrate(context: Context, bitrate: Int) = prefSave(context, PREF_UDP_AUDIO_OPUS_BITRATE, bitrate)
-suspend fun loadUdpAudioOpusBitrate(context: Context): Int = prefLoad(context, PREF_UDP_AUDIO_OPUS_BITRATE, 32000)
+suspend fun loadUdpAudioOpusBitrate(context: Context): Int = prefLoad(context, PREF_UDP_AUDIO_OPUS_BITRATE, 96000)
 suspend fun saveUdpAudioOpusFrameMs(context: Context, frameMs: Int) = prefSave(context, PREF_UDP_AUDIO_OPUS_FRAME_MS, frameMs)
-suspend fun loadUdpAudioOpusFrameMs(context: Context): Int = prefLoad(context, PREF_UDP_AUDIO_OPUS_FRAME_MS, 20)
+suspend fun loadUdpAudioOpusFrameMs(context: Context): Int = prefLoad(context, PREF_UDP_AUDIO_OPUS_FRAME_MS, 10)
 suspend fun saveLatencyRecordingEnabled(context: Context, enabled: Boolean) = prefSave(context, PREF_LATENCY_RECORDING, enabled)
 suspend fun loadLatencyRecordingEnabled(context: Context): Boolean = prefLoad(context, PREF_LATENCY_RECORDING, false)
 
@@ -155,16 +185,17 @@ fun SettingWindow(
     var udpAudioIp by remember { mutableStateOf("127.0.0.1") }
     var tcpControlPort by remember { mutableStateOf("9998") }
     var udpAudioPort by remember { mutableStateOf("9999") }
+    var audioTransport by remember { mutableStateOf(AudioTransportProtocol.QUIC.name) }
     var udpAudioRedundant by remember { mutableStateOf(false) }
-    var udpAudioOpusEnabled by remember { mutableStateOf(false) }
-    var udpAudioOpusBitrate by remember { mutableIntStateOf(32) }
-    var udpAudioOpusBitrateInput by remember { mutableStateOf("32") }
-    var udpAudioOpusFrameMs by remember { mutableIntStateOf(20) }
+    var udpAudioOpusEnabled by remember { mutableStateOf(true) }
+    var udpAudioOpusBitrate by remember { mutableIntStateOf(96) }
+    var udpAudioOpusBitrateInput by remember { mutableStateOf("96") }
+    var udpAudioOpusFrameMs by remember { mutableIntStateOf(10) }
     var latencyRecordingEnabled by remember { mutableStateOf(false) }
 
     val scrollState = rememberScrollState()
     val frameRates = listOf(30, 60, 120, 144, 165)
-    val protocols = listOf("RTMP")
+    val protocols = listOf("RTMP", "QUIC", "UDP")
 
     fun save(action: suspend () -> Unit) = scope.launch { action() }
 
@@ -222,6 +253,9 @@ fun SettingWindow(
         StreamConfig.setUdpAudioPort(udpPort)
         udpAudioPort = udpPort.toString()
 
+        audioTransport = loadAudioTransport(context)
+        StreamConfig.setAudioTransport(audioTransport)
+
         udpAudioRedundant = loadUdpAudioRedundant(context)
         StreamConfig.setUdpAudioRedundant(udpAudioRedundant)
 
@@ -264,7 +298,17 @@ fun SettingWindow(
             protocols.forEach { p ->
                 CheckboxOption(
                     checked = selectedProtocol == p,
-                    onChecked = { selectedProtocol = p; save { saveProtocol(context, p) } },
+                    onChecked = {
+                        val switchedUrl = switchStreamingUrlProtocol(url, p)
+                        url = switchedUrl
+                        selectedProtocol = p
+                        StreamConfig.setCurrentUrl(switchedUrl)
+                        StreamConfig.setStreamingProtocol(p)
+                        save {
+                            saveProtocol(context, p)
+                            saveUrl(context, switchedUrl)
+                        }
+                    },
                     label = p
                 )
             }
@@ -366,7 +410,21 @@ fun SettingWindow(
         }
 
         Spacer(modifier = Modifier.height(24.dp))
-        SectionLabel(stringResource(R.string.settings_udp_audio_configuration))
+        SectionLabel(stringResource(R.string.settings_low_latency_audio_configuration))
+        SectionLabel(stringResource(R.string.settings_audio_transport))
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            AudioTransportProtocol.entries.forEach { transport ->
+                CheckboxOption(
+                    checked = audioTransport == transport.name,
+                    onChecked = {
+                        audioTransport = transport.name
+                        StreamConfig.setAudioTransport(transport.name)
+                        save { saveAudioTransport(context, transport.name) }
+                    },
+                    label = transport.name
+                )
+            }
+        }
         OutlinedTextField(
             value = udpAudioIp,
             onValueChange = { udpAudioIp = it; StreamConfig.setUdpAudioIp(it); save { saveUdpAudioIp(context, it) } },
@@ -374,19 +432,21 @@ fun SettingWindow(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-        OutlinedTextField(
-            value = tcpControlPort,
-            onValueChange = {
-                tcpControlPort = it
-                it.toIntOrNull()?.takeIf { p -> p in 1..65535 }?.let { p ->
-                    StreamConfig.setTcpControlPort(p)
-                    save { saveTcpControlPort(context, p) }
-                }
-            },
-            label = { Text(stringResource(R.string.settings_tcp_control_port)) },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
+        if (audioTransport == AudioTransportProtocol.UDP.name) {
+            OutlinedTextField(
+                value = tcpControlPort,
+                onValueChange = {
+                    tcpControlPort = it
+                    it.toIntOrNull()?.takeIf { p -> p in 1..65535 }?.let { p ->
+                        StreamConfig.setTcpControlPort(p)
+                        save { saveTcpControlPort(context, p) }
+                    }
+                },
+                label = { Text(stringResource(R.string.settings_tcp_control_port)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
         OutlinedTextField(
             value = udpAudioPort,
             onValueChange = {
@@ -396,24 +456,26 @@ fun SettingWindow(
                     save { saveUdpAudioPort(context, p) }
                 }
             },
-            label = { Text(stringResource(R.string.settings_udp_data_port)) },
+            label = { Text(stringResource(R.string.settings_audio_data_port)) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Checkbox(
-                checked = udpAudioRedundant,
-                onCheckedChange = { enabled ->
-                    udpAudioRedundant = enabled
-                    StreamConfig.setUdpAudioRedundant(enabled)
-                    save { saveUdpAudioRedundant(context, enabled) }
-                }
-            )
-            Text(stringResource(R.string.settings_enable_redundant_transmission))
-            IconButton(
-                onClick = { Toast.makeText(context, context.getString(R.string.settings_redundant_transmission_tip), Toast.LENGTH_LONG).show() },
-                modifier = Modifier.size(24.dp)
-            ) { Icon(Icons.Default.Info, contentDescription = stringResource(R.string.settings_info_content_description), tint = Color.Gray) }
+        if (audioTransport == AudioTransportProtocol.UDP.name) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Checkbox(
+                    checked = udpAudioRedundant,
+                    onCheckedChange = { enabled ->
+                        udpAudioRedundant = enabled
+                        StreamConfig.setUdpAudioRedundant(enabled)
+                        save { saveUdpAudioRedundant(context, enabled) }
+                    }
+                )
+                Text(stringResource(R.string.settings_enable_redundant_transmission))
+                IconButton(
+                    onClick = { Toast.makeText(context, context.getString(R.string.settings_redundant_transmission_tip), Toast.LENGTH_LONG).show() },
+                    modifier = Modifier.size(24.dp)
+                ) { Icon(Icons.Default.Info, contentDescription = stringResource(R.string.settings_info_content_description), tint = Color.Gray) }
+            }
         }
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Checkbox(

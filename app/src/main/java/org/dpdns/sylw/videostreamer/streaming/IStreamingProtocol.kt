@@ -1,141 +1,63 @@
 package org.dpdns.sylw.videostreamer.streaming
 
 import android.view.Surface
+import org.dpdns.sylw.videostreamer.encoding.VideoFrameRateDiagnostics
 
-/**
- * 推流协议抽象接口
- *
- * 🔥 设计目标：解耦界面层和协议层
- */
+/** UI/业务层使用的通用推流会话接口。 */
 interface IStreamingProtocol {
-
-    /**
-     * 开始推流
-     *
-     * @param url 推流地址（RTMP 等）
-     * @param config 推流配置
-     */
     fun start(url: String, config: StreamingConfig)
-
-    /**
-     * 开始摄像头模式推流（不需要 MediaProjection）
-     *
-     * @param url 推流地址
-     * @param config 推流配置
-     */
-    fun startCameraMode(url: String, config: StreamingConfig)
-
-    /**
-     * 停止推流
-     */
     fun stop()
-
-    /**
-     * 检查是否正在推流
-     */
     fun isStreaming(): Boolean
-
-    /**
-     * 动态切换推流地址
-     *
-     * @param newUrl 新的推流地址
-     */
     fun switchUrl(newUrl: String)
-
-    /**
-     * 动态更新码率
-     *
-     * @param bitrate 新码率（bps）
-     */
     fun updateBitrate(bitrate: Int)
-
-    /**
-     * 动态更新帧率
-     *
-     * @param frameRate 新帧率（fps）
-     */
     fun updateFrameRate(frameRate: Int)
-
-    /**
-     * 提交外部 PCM 音频数据
-     */
     fun submitExternalAudioData(pcmData: ByteArray, size: Int, timestampNs: Long)
-
-    /**
-     * 获取当前推流地址
-     */
     fun getCurrentUrl(): String?
-
-    /**
-     * 释放资源
-     */
     fun release()
 
-    /**
-     * 编码器异常退出后的资源清理
-     *
-     * 协议实现需要释放编码器、网络连接和协议持有的运行状态，
-     * 并确保上层收到停止推流状态。
-     */
-    fun cleanupAfterEncoderExit()
-
-    /**
-     * 设置状态回调
-     */
     var onStreamingStateChanged: ((Boolean) -> Unit)?
-
-    /**
-     * 设置错误回调
-     */
     var onError: ((String) -> Unit)?
-
-    /**
-     * 设置非致命提示回调
-     */
     var onInfo: ((String) -> Unit)?
-
-    /**
-     * 设置实际视频帧率诊断回调
-     */
     var onVideoFrameRateMeasured: ((VideoFrameRateDiagnostics) -> Unit)?
+    var onLatencyMeasured: ((StreamingLatencyDiagnostics) -> Unit)?
 
-    /**
-     * 编码器输入 Surface 就绪回调
-     * 当协议层创建好编码器的输入 Surface 后触发，UI 层可用该 Surface
-     * 连接 Camera2（摄像头模式）或更新 VirtualDisplay（录屏模式）。
-     */
+    /** 编码器输入 Surface 就绪后交给摄像头或录屏模块。 */
     val onSurfaceReady: (Surface) -> Unit
 }
 
-/**
- * 编码输出的实际帧率诊断结果
- *
- * actualFps 基于编码帧 PTS 计算，与播放器看到的视频时间轴一致；
- * wallClockFps 用于辅助判断编码线程是否存在阻塞。
- */
-data class VideoFrameRateDiagnostics(
-    val requestedFps: Int,
-    val actualFps: Double,
-    val wallClockFps: Double
+data class StreamingLatencyDiagnostics(
+    val protocol: String,
+    val transport: String,
+    val latencyMinMs: Double?,
+    val latencyMaxMs: Double?,
+    val encodeMinMs: Double?,
+    val encodeMaxMs: Double?,
+    val clockRttMs: Double?,
+    val packetLossRatio: Double,
+    val recoveredFragments: Long,
+    val droppedFrames: Long,
+    val bitrateKbps: Int,
+    val framesPerSecond: Double
 )
 
-/**
- * 推流配置数据类
- */
 data class StreamingConfig(
     val width: Int = 1920,
     val height: Int = 1080,
     val dpi: Int = 320,
-    val videoBitrate: Int = 2500_000,  // 2.5 Mbps
+    val videoBitrate: Int = 2_500_000,
     val frameRate: Int = 30,
-    val iFrameInterval: Int = 5,
-    val videoMode: String = "CBR",    // 🔥 新增：CBR 或 CQ
-    val videoQuality: Int = 70,       // 🔥 新增：0-100
+    // LiveSuite QUIC 视频使用可靠流；UDP fallback 仍使用短 GOP 以便丢包后尽快恢复。
+    val iFrameInterval: Int = 1,
+    val videoMode: String = "CBR",
+    val videoQuality: Int = 70,
+    /** Surface 输入长时间没有新画面时，要求编码器重复上一帧；仅录屏源需要。 */
+    val repeatPreviousFrameAfterUs: Long? = null,
     val useAudio: Boolean = true,
     val onAudioCaptureStart: (() -> Unit)? = null,
     val onAudioCaptureStop: (() -> Unit)? = null,
-    val audioSampleRate: Int = 48000,
+    val audioSampleRate: Int = 48_000,
     val audioChannelCount: Int = 2,
-    val audioBitrate: Int = 128_000,   // 128 kbps
+    val audioBitrate: Int = 128_000,
+    val audioGroupDurationUs: Long = 0L,
     val requireHardwareVideoEncoder: Boolean = false
 )

@@ -66,6 +66,19 @@ class MediaProjectionService : Service() {
     
     // 🔥 全局变量：单个 PCM 包大小（由 AudioRecord.getMinBufferSize 计算得出）
     private var audioPacketSize: Int = 0
+
+    private data class AudioCaptureFormat(
+        val sampleRate: Int,
+        val channelConfig: Int,
+        val bufferSize: Int
+    ) {
+        val channelCount: Int
+            get() = if (channelConfig == AudioFormat.CHANNEL_IN_STEREO) 2 else 1
+
+        val durationUs: Long
+            get() = bufferSize.toLong() * 1_000_000L /
+                (channelCount.toLong() * 2L * sampleRate.toLong())
+    }
     
     // 屏幕旋转回调，通知 StreamManager 更新编码器
     var onScreenRotation: ((Int, Int) -> Unit)? = null
@@ -96,7 +109,7 @@ class MediaProjectionService : Service() {
             set(value) { this@MediaProjectionService.onMediaProjectionStopped = value }
 
 
-        // 供 SurfaceTextureEncoder 设置它的 input surface 到 VirtualDisplay
+        // 供 MediaCodecEncoder 设置它的 input surface 到 VirtualDisplay
         fun updateVirtualDisplaySurface(encoderSurface: Surface, width: Int, height: Int) {
 //            android.util.Log.d("MediaProj", "updateVirtualDisplaySurface called")
             if (cachedWidth > 0 && cachedHeight > 0) {
@@ -125,7 +138,7 @@ class MediaProjectionService : Service() {
                     handleRotationChange(currentOrientation)
                 }
                         
-                // 不再创建 VirtualDisplay，由 SurfaceTextureEncoder 自己创建
+            // 不再创建 VirtualDisplay，由 MediaCodecEncoder 提供输入 Surface
 //                android.util.Log.d("MediaProj", "toggleStreaming: config is ${if (config == null) "null" else "valid"}, starting audio capture")
                 startAudioCapture()
                 isStreaming.value = true
@@ -145,9 +158,12 @@ class MediaProjectionService : Service() {
         
         // 🔥 获取音频包大小（用于外部缓冲区分配）
         fun getAudioPacketSize(): Int = audioPacketSize
+
+        // 获取 AudioRecord 单次采集 PCM 组覆盖的时长，用于发送端同步补偿。
+        fun getAudioGroupDurationUs(): Long = this@MediaProjectionService.audioGroupDurationUs()
         
-        // 🔥 停止服务（释放投影、音频等全部资源）
-        fun stop() = this@MediaProjectionService.stopSelf()
+        // 🔥 主动停止投影，并终止依赖它的音频采集与前台服务。
+        fun stop() = this@MediaProjectionService.stopProjectionSession()
 
         // 设置内录 PCM 数据回调，由采集线程直接提交给编码器
         fun setAudioDataCallback(callback: ((ByteArray, Int, Long) -> Unit)?) {
@@ -156,6 +172,24 @@ class MediaProjectionService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
+
+    private fun stopProjectionSession() {
+        isRunning.value = false
+        isStreaming.value = false
+        stopAudioCapture()
+        config = null
+
+        val activeProjection = mediaProjection
+        mediaProjection = null
+        if (activeProjection != null) {
+            // 会触发已注册的 onStop 回调，完成投影状态收尾。
+            activeProjection.stop()
+        } else {
+            onMediaProjectionStopped?.invoke()
+        }
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -280,12 +314,17 @@ class MediaProjectionService : Service() {
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
 //                android.util.Log.d("MediaProj", "Projection stopped by system.")
+                mediaProjection = null
+                config = null
                 isRunning.value = false
+                isStreaming.value = false
+                stopAudioCapture()
                 
                 // 🔥 通知上层停止推流
                 onMediaProjectionStopped?.invoke()
 //                android.util.Log.d("MediaProj", "Notified onMediaProjectionStopped callback")
                 
+                stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
         }, null)
@@ -409,39 +448,15 @@ class MediaProjectionService : Service() {
             return
         }
 
-        // Android AudioPlaybackCapture API 推荐的采样率
-        val sampleRate = 48000
-        val channelConfig = AudioFormat.CHANNEL_IN_STEREO
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-        
-        // 获取最小缓冲区大小，并设置为 2 倍以保证稳定性
-        var minBufferSize: Int? = null
-        
-        // 🔥 失败处理策略：尝试降低采样率 -> 单声道 -> 两个都改
-        val formats = listOf(
-            Pair(sampleRate, channelConfig),
-            Pair(44100, channelConfig),
-            Pair(48000, AudioFormat.CHANNEL_IN_MONO),
-            Pair(44100, AudioFormat.CHANNEL_IN_MONO)
-        )
-        
-        var currentSampleRate = sampleRate
-        var currentChannelConfig = channelConfig
-        
-        for (f in formats) {
-            val size = AudioRecord.getMinBufferSize(f.first, f.second, audioFormat)
-            if (size > 0) {
-                currentSampleRate = f.first
-                currentChannelConfig = f.second
-                minBufferSize = size
-                break
-            }
-        }
-
-        if (minBufferSize == null) {
+        val captureFormat = resolveAudioCaptureFormat()
+        if (captureFormat == null) {
             android.util.Log.e("MediaProj", "❌ Could not find valid audio configuration")
             return
         }
+        val currentSampleRate = captureFormat.sampleRate
+        val currentChannelConfig = captureFormat.channelConfig
+        val minBufferSize = captureFormat.bufferSize
         
         // 🔥 关键修复：将 bufferSize 保存为全局变量，作为单个 PCM 包大小
         audioPacketSize = minBufferSize
@@ -485,7 +500,8 @@ class MediaProjectionService : Service() {
 //                android.util.Log.e("AudioCapture", "🎤 [THREAD] AudioCaptureThread STARTED")
                 var readCount = 0
                 var emptyReadCount = 0
-                val timestampArray = LongArray(1) // 🔥 用于接收时间戳
+                var framesRead = 0L
+                val bytesPerFrame = if (currentChannelConfig == AudioFormat.CHANNEL_IN_STEREO) 4 else 2
                 
                 while (isAudioRecording && !Thread.interrupted()) {
                     try {
@@ -508,14 +524,20 @@ class MediaProjectionService : Service() {
                                 
                                 // 获取 AudioTimestamp（采集时的硬件时间戳）
                                 val audioTimestamp = android.media.AudioTimestamp()
-                                val getResult = audioRecord?.getTimestamp(audioTimestamp, android.media.AudioTimestamp.TIMEBASE_MONOTONIC)
-//                                val hasTimestamp = (getResult == android.media.AudioRecord.SUCCESS)
-                                val timestampNs =
-//                                    if (hasTimestamp) {
-                                    audioTimestamp.nanoTime
-//                                } else {
-//                                    System.nanoTime() // Fallback：使用系统时间
-//                                }
+                                val blockFrames = read / bytesPerFrame
+                                val firstFramePosition = framesRead
+                                framesRead += blockFrames
+                                val getResult = audioRecord?.getTimestamp(
+                                    audioTimestamp,
+                                    android.media.AudioTimestamp.TIMEBASE_MONOTONIC
+                                )
+                                val timestampNs = if (getResult == AudioRecord.SUCCESS) {
+                                    audioTimestamp.nanoTime +
+                                        (firstFramePosition - audioTimestamp.framePosition) *
+                                        1_000_000_000L / currentSampleRate
+                                } else {
+                                    System.nanoTime() - blockFrames * 1_000_000_000L / currentSampleRate
+                                }
                                 
                                 audioDataCallback?.invoke(data, read, timestampNs)
                             }
@@ -548,6 +570,29 @@ class MediaProjectionService : Service() {
 //            android.util.Log.e("AudioCapture", "Failed to start audio capture: ${e.message}", e)
         }
     }
+
+    private fun resolveAudioCaptureFormat(): AudioCaptureFormat? {
+        val formats = listOf(
+            48_000 to AudioFormat.CHANNEL_IN_STEREO,
+            44_100 to AudioFormat.CHANNEL_IN_STEREO,
+            48_000 to AudioFormat.CHANNEL_IN_MONO,
+            44_100 to AudioFormat.CHANNEL_IN_MONO
+        )
+        return formats.asSequence()
+            .mapNotNull { (sampleRate, channelConfig) ->
+                val bufferSize = AudioRecord.getMinBufferSize(
+                    sampleRate,
+                    channelConfig,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                bufferSize.takeIf { it > 0 }?.let {
+                    AudioCaptureFormat(sampleRate, channelConfig, it)
+                }
+            }
+            .firstOrNull()
+    }
+
+    private fun audioGroupDurationUs(): Long = resolveAudioCaptureFormat()?.durationUs ?: 0L
 
     private fun stopAudioCapture() {
         isAudioRecording = false
@@ -650,6 +695,8 @@ class MediaProjectionService : Service() {
 
     override fun onDestroy() {
 //        android.util.Log.d("MediaProj", "Service Destroying...")
+        isRunning.value = false
+        isStreaming.value = false
         
         // 注销 DisplayListener（屏幕旋转监听）
         try {
@@ -680,6 +727,10 @@ class MediaProjectionService : Service() {
 
         mediaProjection?.stop()
         mediaProjection = null
+        config = null
+        audioDataCallback = null
+        onScreenRotation = null
+        onMediaProjectionStopped = null
         super.onDestroy()
     }
 

@@ -18,6 +18,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -35,7 +36,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.dpdns.sylw.videostreamer.camera.CameraStreamManager
-import org.dpdns.sylw.videostreamer.streaming.VideoFrameRateDiagnostics
+import org.dpdns.sylw.videostreamer.encoding.VideoFrameRateDiagnostics
+import org.dpdns.sylw.videostreamer.streaming.StreamingLatencyDiagnostics
 import org.dpdns.sylw.videostreamer.ui.theme.VideoStreamerTheme
 import org.dpdns.sylw.videostreamer.ui.components.SafeButton
 import org.dpdns.sylw.videostreamer.ui.components.SafeButtonState
@@ -45,6 +47,23 @@ private enum class FocusStatus { FOCUSING, SUCCESS, FAILED }
 
 /** 对焦提示（位置 + 状态），坐标与预览点击坐标一致（px） */
 private data class FocusIndicator(val x: Float, val y: Float, val status: FocusStatus)
+
+internal fun canHandleCameraFocusTap(
+    isStreaming: Boolean,
+    isCameraReady: Boolean,
+    isPreviewAvailable: Boolean
+): Boolean = isStreaming && isCameraReady && isPreviewAvailable
+
+internal fun Modifier.cameraFocusInput(
+    enabled: Boolean,
+    onTap: (Offset) -> Unit
+): Modifier = if (enabled) {
+    pointerInput(enabled, onTap) {
+        detectTapGestures(onTap = onTap)
+    }
+} else {
+    this
+}
 
 /**
  * Camera 推流页面
@@ -63,7 +82,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     val activity = context.findActivity()
     val scope = rememberCoroutineScope()
     val cameraPermissionRequiredText = stringResource(R.string.error_camera_permission_required)
-    val rtmpUrlRequiredText = stringResource(R.string.error_rtmp_url_required)
+    val streamUrlRequiredText = stringResource(R.string.error_stream_url_required)
     
     // Camera 管理器
     var cameraManager by remember { mutableStateOf<CameraStreamManager?>(null) }
@@ -71,8 +90,11 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     // 状态管理
     var isStreaming by remember { mutableStateOf(false) }
     var isPending by remember { mutableStateOf(false) }
+    var isCameraReady by remember { mutableStateOf(false) }
+    var isPreviewAvailable by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var frameRateDiagnostics by remember { mutableStateOf<VideoFrameRateDiagnostics?>(null) }
+    var latencyDiagnostics by remember { mutableStateOf<StreamingLatencyDiagnostics?>(null) }
     
     // 配置选项
     var selectedCameraId by remember { mutableStateOf<String?>(null) }
@@ -136,7 +158,22 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 scope.launch {
                     isStreaming = streaming
                     isPending = false  // 连接完成或断开，清除 pending
-                    if (!streaming) frameRateDiagnostics = null
+                    if (!streaming) {
+                        isPreviewAvailable = false
+                        focusIndicator = null
+                        frameRateDiagnostics = null
+                        latencyDiagnostics = null
+                    }
+                }
+            }
+
+            onCameraReady = { ready ->
+                scope.launch {
+                    isCameraReady = ready
+                    if (!ready) {
+                        isPreviewAvailable = false
+                        focusIndicator = null
+                    }
                 }
             }
 
@@ -159,12 +196,21 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                     frameRateDiagnostics = diagnostics
                 }
             }
+
+            onLatencyMeasured = { diagnostics ->
+                scope.launch {
+                    latencyDiagnostics = diagnostics
+                }
+            }
         }
     }
 
     // 开始/停止推流（同时打开/关闭摄像头）
     fun toggleStreaming() {
         if (isStreaming) {
+            isCameraReady = false
+            isPreviewAvailable = false
+            focusIndicator = null
 //            cameraManager?.stopStreaming()
             cameraManager?.closeCamera()
 
@@ -172,24 +218,31 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else if (!isPending) {
             isPending = true
+            isPreviewAvailable = false
             frameRateDiagnostics = null
+            latencyDiagnostics = null
 
             fun startStreaming() {
                 scope.launch {
                     // 先让 Compose 有机会刷新按钮状态，再执行后续可能耗时的推流启动逻辑。
                     yield()
 
-                    val rtmpUrl = loadUrl(context)
-                    if (rtmpUrl.isNullOrEmpty()) {
+                    val streamUrl = loadUrl(context)
+                    if (streamUrl.isEmpty()) {
                         isPending = false
-                        errorMessage = rtmpUrlRequiredText
-                        Toast.makeText(context, rtmpUrlRequiredText, Toast.LENGTH_LONG).show()
+                        errorMessage = streamUrlRequiredText
+                        Toast.makeText(context, streamUrlRequiredText, Toast.LENGTH_LONG).show()
                         return@launch
                     }
+                    val selectedProtocol = StreamConfig.getStreamingProtocol() ?: "RTMP"
                     // 验证 URL 格式
-                    if (!rtmpUrl.startsWith("rtmp://")) {
+                    if (!isValidStreamingUrl(streamUrl, selectedProtocol)) {
                         isPending = false
-                        val error = context.getString(R.string.error_invalid_rtmp_url, rtmpUrl)
+                        val error = context.getString(
+                            R.string.error_invalid_stream_url,
+                            streamUrl,
+                            expectedStreamingScheme(selectedProtocol)
+                        )
                         errorMessage = error
                         Toast.makeText(context, error, Toast.LENGTH_LONG).show()
                         return@launch
@@ -211,7 +264,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         val currentActivity = activity!!
                         withContext(Dispatchers.IO) {
                             cameraManager?.startStreaming(
-                                rtmpUrl,
+                                streamUrl,
                                 cameraConfig,
                                 currentActivity
                             )
@@ -322,6 +375,11 @@ fun CameraWindow(modifier: Modifier = Modifier) {
     }
     
     // UI 布局
+    val focusInputEnabled = canHandleCameraFocusTap(
+        isStreaming = isStreaming,
+        isCameraReady = isCameraReady,
+        isPreviewAvailable = isPreviewAvailable
+    )
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -332,6 +390,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                 TextureView(ctx).apply {
                     surfaceTextureListener = object : TextureView.SurfaceTextureListener {
                         override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                            isPreviewAvailable = false
                             cameraManager?.setPreviewSurfaceTexture(surface)
                         }
 
@@ -340,11 +399,17 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                         }
 
                         override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                            isPreviewAvailable = false
+                            focusIndicator = null
                             cameraManager?.setPreviewSurfaceTexture(null)
                             return true
                         }
 
-                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+                        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+                            if (isStreaming && isCameraReady) {
+                                isPreviewAvailable = true
+                            }
+                        }
                     }
                 }
             },
@@ -356,19 +421,17 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             },
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
-                    detectTapGestures { offset ->
-                        focusIndicator = FocusIndicator(offset.x, offset.y, FocusStatus.FOCUSING)
-                        scope.launch {
-                            delay(300)
-                            focusIndicator = null
-                        }
+                .cameraFocusInput(focusInputEnabled) { offset ->
+                    focusIndicator = FocusIndicator(offset.x, offset.y, FocusStatus.FOCUSING)
+                    scope.launch {
+                        delay(300)
+                        focusIndicator = null
                     }
                 }
         )
 
         // 🔥 对焦提示框（位置跟随点击坐标，颜色随状态变化）
-        focusIndicator?.let { indicator ->
+        focusIndicator?.takeIf { focusInputEnabled }?.let { indicator ->
             val borderColor = when (indicator.status) {
                 FocusStatus.FOCUSING -> Color.Yellow
                 FocusStatus.SUCCESS -> Color.Green
@@ -456,6 +519,53 @@ fun CameraWindow(modifier: Modifier = Modifier) {
                             Text(
                                 text = stringResource(R.string.camera_actual_fps_diagnosis_limited),
                                 color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+
+                    if (StreamConfig.getStreamingProtocol()?.uppercase() in setOf("QUIC", "UDP")) {
+                        val transport = latencyDiagnostics
+                        Spacer(modifier = Modifier.height(6.dp))
+                        if (transport?.latencyMinMs == null || transport.latencyMaxMs == null) {
+                            Text(
+                                text = stringResource(R.string.camera_transport_measuring),
+                                color = Color.Gray,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        } else {
+                            Text(
+                                text = stringResource(
+                                    R.string.camera_latency_range,
+                                    transport.transport,
+                                    transport.latencyMinMs,
+                                    transport.latencyMaxMs
+                                ),
+                                color = if (transport.latencyMaxMs <= 150.0) Color.Green else MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            if (transport.encodeMinMs != null && transport.encodeMaxMs != null) {
+                                Text(
+                                    text = stringResource(
+                                        R.string.camera_encode_range,
+                                        transport.encodeMinMs,
+                                        transport.encodeMaxMs,
+                                        transport.clockRttMs?.let { "${it.toInt()} ms" } ?: "—"
+                                    ),
+                                    color = Color.Gray,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            Text(
+                                text = stringResource(
+                                    R.string.camera_network_quality,
+                                    transport.framesPerSecond,
+                                    transport.bitrateKbps,
+                                    transport.packetLossRatio * 100.0,
+                                    transport.recoveredFragments,
+                                    transport.droppedFrames
+                                ),
+                                color = Color.Gray,
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }

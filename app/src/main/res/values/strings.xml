@@ -16,11 +16,14 @@
     <string name="settings_video_quality_value">视频质量：%1$d</string>
     <string name="settings_frame_rate_value">帧率：%1$d fps</string>
     <string name="settings_udp_audio_configuration">UDP 音频配置：</string>
+    <string name="settings_low_latency_audio_configuration">低延迟音频配置：</string>
+    <string name="settings_audio_transport">音频传输协议：</string>
+    <string name="settings_audio_data_port">音频数据端口</string>
     <string name="settings_server_ip">服务器 IP</string>
     <string name="settings_tcp_control_port">TCP 控制端口</string>
     <string name="settings_udp_data_port">UDP 数据端口</string>
-    <string name="settings_enable_redundant_transmission">启用冗余传输</string>
-    <string name="settings_redundant_transmission_tip">启用后会增加网络负载，但可提升音频稳定性。</string>
+    <string name="settings_enable_redundant_transmission">启用 UDP 冗余发送</string>
+    <string name="settings_redundant_transmission_tip">仅用于 UDP 回退模式；每个音频包重复发送三次，会增加网络负载，但可降低内网丢包影响。</string>
     <string name="settings_info_content_description">说明</string>
     <string name="settings_enable_opus_compression">启用 Opus 压缩</string>
     <string name="settings_opus_frame_duration_value">Opus 帧长：%1$d ms</string>
@@ -35,6 +38,7 @@
 
     <string name="video_screen_service_running">录屏服务正在运行</string>
     <string name="video_authorize_and_start_screen">授权并开启录屏</string>
+    <string name="video_stop_screen_and_services">关闭录屏及相关服务</string>
     <string name="video_start_streaming">开始推流</string>
     <string name="video_stop_streaming">停止推流</string>
     <string name="video_start_audio">开始音频</string>
@@ -58,6 +62,10 @@
     <string name="camera_actual_fps_measuring">实际编码帧率：检测中…</string>
     <string name="camera_actual_fps_value">实际编码帧率：%1$.1f fps / 目标 %2$d fps</string>
     <string name="camera_actual_fps_diagnosis_limited">诊断：摄像头实际输出未达到目标帧率</string>
+    <string name="camera_transport_measuring">传输延迟：测量中…</string>
+    <string name="camera_latency_range">%1$s 端到端延迟：%2$.0f–%3$.0f ms</string>
+    <string name="camera_encode_range">编码耗时：%1$.0f–%2$.0f ms · 时钟 RTT：%3$s</string>
+    <string name="camera_network_quality">接收 %1$.1f fps / %2$d kbps · 残余丢片 %3$.2f%% · FEC 重建 %4$d · 丢帧 %5$d</string>
     <string name="camera_start_camera">启动摄像头</string>
     <string name="camera_stop_camera">停止摄像头</string>
     <string name="error_camera_list_failed">无法获取摄像头列表：%1$s</string>
@@ -70,6 +78,8 @@
     <string name="error_camera_permission_required">需要摄像头权限才能使用此功能</string>
     <string name="error_rtmp_url_required">请先在设置页面配置 RTMP 地址</string>
     <string name="error_invalid_rtmp_url">推流地址格式无效：%1$s\n地址必须以 rtmp:// 开头</string>
+    <string name="error_stream_url_required">请先在设置页面配置推流地址</string>
+    <string name="error_invalid_stream_url">推流地址格式无效：%1$s\n当前协议要求以 %2$s:// 开头，并提供主机与端口</string>
     <string name="error_udp_audio_ip_invalid">UDP 音频 IP 地址无效，请在设置页配置正确的 IP</string>
 
     <string name="notification_screen_service_running">录屏服务运行中</string>

@@ -32,7 +32,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
-import org.dpdns.sylw.videostreamer.udpAudio.UdpAudioManager
+import org.dpdns.sylw.videostreamer.udpAudio.AudioTransportProtocol
+import org.dpdns.sylw.videostreamer.udpAudio.LowLatencyAudioManager
 import org.dpdns.sylw.videostreamer.ui.components.SafeButton
 import org.dpdns.sylw.videostreamer.ui.components.SafeButtonState
 
@@ -54,7 +55,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
     
     // 🔥 TCP音频管理器 (已移除)
     // var tcpAudioManager by remember { mutableStateOf<TcpAudioManager?>(null) }
-    var udpAudioManager by remember { mutableStateOf<UdpAudioManager?>(null) }
+    var udpAudioManager by remember { mutableStateOf<LowLatencyAudioManager?>(null) }
     var isUdpAudioStreaming by remember { mutableStateOf(false) }
     var isUdpAudioPending by remember { mutableStateOf(false) }
     var currentLatency by remember { mutableStateOf<Pair<Long, Long>?>(null) }
@@ -161,6 +162,33 @@ fun VideoWindow(modifier: Modifier = Modifier) {
         }
     }
 
+    fun stopScreenCaptureSession() {
+        isPending = false
+        isUdpAudioPending = false
+
+        streamManager?.let { manager ->
+            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                manager.stopStreaming()
+            }
+        }
+        udpAudioManager?.stop()
+
+        mediaProjectionService?.apply {
+            // 依赖项已由本次点击统一停止，避免 MediaProjection 回调重复关闭。
+            onMediaProjectionStopped = null
+            setAudioDataCallback(null)
+            stop()
+        }
+        try {
+            context.unbindService(connection)
+        } catch (_: Exception) {
+        }
+        mediaProjectionService = null
+
+        // Binder 尚未连接时也能终止已经启动的前台服务。
+        context.stopService(Intent(context, MediaProjectionService::class.java))
+    }
+
     // 页面销毁时解绑
     DisposableEffect(Unit) {
         onDispose {
@@ -181,7 +209,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
             onDispose {}
         } else {
             // 关键修复：设置全局 streaming 引用，让 SettingWindow 可以访问
-            streamManager = StreamManager(activity, { surface ->
+            streamManager = StreamManager({ surface ->
                 mediaProjectionService?.let { binder ->
                     try {
                         val screenSize = binder.getScreenRealSize()
@@ -237,14 +265,15 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                 bitrate = savedBitrate,
                 frameRate = savedFrameRate,
                 videoMode = savedMode,
-                videoQuality = savedQuality
+                videoQuality = savedQuality,
+                repeatPreviousFrameAfterUs = 1_000_000L / savedFrameRate.coerceAtLeast(1)
             )
         
             // 🔥 初始化TCP音频管理器 (改为使用新的双重协议 UDPAudioManager，TCPManager 已移除)
             // tcpAudioManager = TcpAudioManager().apply { ... }
         
             // 🔥 初始化UDP音频管理器
-            udpAudioManager = UdpAudioManager().apply {
+            udpAudioManager = LowLatencyAudioManager().apply {
                 onConnectionStateChanged = { connected ->
                     isUdpAudioStreaming = connected
                     isUdpAudioPending = false  // 连接完成或断开，清除 pending
@@ -288,6 +317,8 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 
             binder.onMediaProjectionStopped = {
 //                android.util.Log.w("VideoWindow", "⚠️ MediaProjection stopped by system!")
+                isPending = false
+                isUdpAudioPending = false
                 streamManager?.stopStreaming()
                 udpAudioManager?.stop()
             }
@@ -385,58 +416,17 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                             context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                         screenCaptureLauncher.launch(mpManager.createScreenCaptureIntent())
                     } else {
-//                        android.util.Log.d("VideoWindow", "Entering authorized branch")
-                        mediaProjectionService?.let { binder ->
-//                            android.util.Log.d("VideoWindow", "binder is valid, calling toggleStreaming")
-                            // 获取实际屏幕分辨率（物理尺寸）
-                            val screenSize = binder.getScreenRealSize()
-                            val actualWidth = screenSize.x
-                            val actualHeight = screenSize.y
-
-                            // 获取保存的码率
-                            scope.launch {
-                                val savedBitrate = loadBitrate(context)
-
-//                                android.util.Log.d("VideoWindow", "=== 开始配置 ===")
-//                                android.util.Log.d("VideoWindow", "binder: ${if (binder == null) "null" else "valid"}")
-//                                android.util.Log.d("VideoWindow", "streamManager: ${if (streamManager == null) "null" else "valid"}")
-
-                                // 获取实际屏幕分辨率（物理尺寸）
-                                val screenSize = binder.getScreenRealSize()
-                                val actualWidth = screenSize.x
-                                val actualHeight = screenSize.y
-
-//                                android.util.Log.d("VideoWindow", "推流分辨率：${actualWidth}x${actualHeight}")
-//                                android.util.Log.d("VideoWindow", "码率：$savedBitrate bps")
-//                                android.util.Log.d("VideoWindow", "=== 配置结束 ===")
-
-                                // 设置视频参数（使用物理分辨率）
-                                streamManager?.setVideoParams(
-                                    width = actualWidth,
-                                    height = actualHeight,
-                                    bitrate = savedBitrate,
-                                    frameRate = 30,
-                                    iFrameInterval = 5,
-                                    videoMode = StreamConfig.getRateMode() ?: "CBR",
-                                    videoQuality = StreamConfig.getCqQuality() ?: 70
-                                )
-
-//                                android.util.Log.d("VideoWindow", "准备调用 toggleStreaming(true)")
-//                                android.util.Log.d("VideoWindow", "toggleStreaming(true) 调用完成")
-                            }
-                        }
+                        stopScreenCaptureSession()
                     }
                 },
                 modifier = Modifier.weight(1f),
                 colors = if (isAuthorized) ButtonDefaults.buttonColors(
-                    containerColor = Color(
-                        0xFF4CAF50
-                    )
+                    containerColor = Color(0xFFF44336)
                 ) else ButtonDefaults.buttonColors()
             ) {
                 Text(
                     if (isAuthorized) {
-                        stringResource(R.string.video_screen_service_running)
+                        stringResource(R.string.video_stop_screen_and_services)
                     } else {
                         stringResource(R.string.video_authorize_and_start_screen)
                     }
@@ -456,14 +446,23 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                             }
                         } else if (!isPending) {
                             // 开始推流
-                            val rtmpUrl = currentRtmpUrl
+                            val rtmpUrl = StreamConfig.getCurrentUrl() ?: currentRtmpUrl
                             if (rtmpUrl.isNullOrEmpty()) {
-                                Toast.makeText(context, context.getString(R.string.error_rtmp_url_required), Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, context.getString(R.string.error_stream_url_required), Toast.LENGTH_LONG).show()
                                 return@let
                             }
+                            val selectedProtocol = StreamConfig.getStreamingProtocol() ?: "RTMP"
                             // 验证 URL 格式
-                            if (!rtmpUrl.startsWith("rtmp://")) {
-                                Toast.makeText(context, context.getString(R.string.error_invalid_rtmp_url, rtmpUrl), Toast.LENGTH_LONG).show()
+                            if (!isValidStreamingUrl(rtmpUrl, selectedProtocol)) {
+                                Toast.makeText(
+                                    context,
+                                    context.getString(
+                                        R.string.error_invalid_stream_url,
+                                        rtmpUrl,
+                                        expectedStreamingScheme(selectedProtocol)
+                                    ),
+                                    Toast.LENGTH_LONG
+                                ).show()
                                 return@let
                             }
 
@@ -482,16 +481,22 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                         val savedBitrate = loadBitrate(context)
                                         val savedFrameRate = loadFrameRate(context)
 
+                                        // 设置页可能在当前页面存活期间切换协议，启动前重新绑定所选实现。
+                                        manager.init(selectedProtocol)
+
                                         // 设置视频参数（使用实际分辨率和保存的帧率）
                                         manager.setVideoParams(
                                             width = actualWidth,
                                             height = actualHeight,
                                             bitrate = savedBitrate,
                                             frameRate = savedFrameRate,
-                                            iFrameInterval = 5,
+                                            iFrameInterval = 1,
                                             videoMode = StreamConfig.getRateMode() ?: "CBR",
-                                            videoQuality = StreamConfig.getCqQuality() ?: 70
+                                            videoQuality = StreamConfig.getCqQuality() ?: 70,
+                                            repeatPreviousFrameAfterUs =
+                                                1_000_000L / savedFrameRate.coerceAtLeast(1)
                                         )
+                                        manager.setAudioGroupDurationUs(binder.getAudioGroupDurationUs())
 
                                         manager.startStreaming(rtmpUrl)
                                     } catch (e: Exception) {
@@ -548,6 +553,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                             }
                             val tcpPort = loadTcpControlPort(context)
                             val udpPort = loadUdpAudioUdpPort(context)
+                            val audioTransport = AudioTransportProtocol.from(loadAudioTransport(context))
                             val opusEnabled = loadUdpAudioOpusEnabled(context)
                             val opusBitrate = loadUdpAudioOpusBitrate(context)
                             val opusFrameMs = loadUdpAudioOpusFrameMs(context)
@@ -556,9 +562,11 @@ fun VideoWindow(modifier: Modifier = Modifier) {
                                 binder.setAudioCaptureMode(isVideoPush = false)
                                 udpAudioManager?.updateConfig(
                                     ip = ip,
-                                    tcpPort = tcpPort,
-                                    udpPort = udpPort,
+                                    controlPort = tcpPort,
+                                    mediaPort = udpPort,
                                     enabled = true,
+                                    protocol = audioTransport,
+                                    redundantTransmission = loadUdpAudioRedundant(context),
                                     opusEnabled = opusEnabled,
                                     opusBitrate = opusBitrate,
                                     opusFrameMs = opusFrameMs

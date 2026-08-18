@@ -16,11 +16,14 @@
     <string name="settings_video_quality_value">Video Quality: %1$d</string>
     <string name="settings_frame_rate_value">Frame Rate: %1$d fps</string>
     <string name="settings_udp_audio_configuration">UDP Audio Configuration:</string>
+    <string name="settings_low_latency_audio_configuration">Low-latency Audio:</string>
+    <string name="settings_audio_transport">Audio transport:</string>
+    <string name="settings_audio_data_port">Audio data port</string>
     <string name="settings_server_ip">Server IP</string>
     <string name="settings_tcp_control_port">TCP Control Port</string>
     <string name="settings_udp_data_port">UDP Data Port</string>
-    <string name="settings_enable_redundant_transmission">Enable Redundant Transmission</string>
-    <string name="settings_redundant_transmission_tip">Enabling this will increase network load but improve audio stability.</string>
+    <string name="settings_enable_redundant_transmission">Enable UDP redundancy</string>
+    <string name="settings_redundant_transmission_tip">Only applies to UDP fallback. Each audio packet is sent three times, increasing bandwidth while reducing the impact of LAN packet loss.</string>
     <string name="settings_info_content_description">Info</string>
     <string name="settings_enable_opus_compression">Enable Opus compression</string>
     <string name="settings_opus_frame_duration_value">Opus frame duration: %1$d ms</string>
@@ -35,6 +38,7 @@
 
     <string name="video_screen_service_running">Screen service is running</string>
     <string name="video_authorize_and_start_screen">Authorize and Start Screen Capture</string>
+    <string name="video_stop_screen_and_services">Stop Screen Capture and Services</string>
     <string name="video_start_streaming">Start Streaming</string>
     <string name="video_stop_streaming">Stop Streaming</string>
     <string name="video_start_audio">Start Audio</string>
@@ -58,6 +62,10 @@
     <string name="camera_actual_fps_measuring">Actual encoded frame rate: measuring…</string>
     <string name="camera_actual_fps_value">Actual encoded frame rate: %1$.1f fps / target %2$d fps</string>
     <string name="camera_actual_fps_diagnosis_limited">Diagnosis: camera output did not reach the target frame rate</string>
+    <string name="camera_transport_measuring">Transport latency: measuring…</string>
+    <string name="camera_latency_range">%1$s end-to-end latency: %2$.0f–%3$.0f ms</string>
+    <string name="camera_encode_range">Encode time: %1$.0f–%2$.0f ms · clock RTT: %3$s</string>
+    <string name="camera_network_quality">Receive %1$.1f fps / %2$d kbps · residual loss %3$.2f%% · FEC rebuilt %4$d · dropped %5$d</string>
     <string name="camera_start_camera">Start Camera</string>
     <string name="error_camera_list_failed">Failed to get camera list: %1$s</string>
     <string name="error_audio_start_failed">Failed to start audio: %1$s</string>
@@ -70,6 +78,8 @@
     <string name="error_camera_permission_required">Camera permission is required to use this feature</string>
     <string name="error_rtmp_url_required">Configure the RTMP URL in Settings first</string>
     <string name="error_invalid_rtmp_url">Invalid stream URL: %1$s\nURL must start with rtmp://</string>
+    <string name="error_stream_url_required">Configure the stream URL in Settings first</string>
+    <string name="error_invalid_stream_url">Invalid stream URL: %1$s\nThe selected protocol requires %2$s:// with a host and port</string>
     <string name="error_udp_audio_ip_invalid">Invalid UDP audio IP address, configure it in Settings</string>
 
     <string name="notification_screen_service_running">Screen capture service is running</string>

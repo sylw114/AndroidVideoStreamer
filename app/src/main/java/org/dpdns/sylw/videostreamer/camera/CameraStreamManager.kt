@@ -34,9 +34,12 @@ import com.google.common.util.concurrent.ListenableFuture
 import java.util.concurrent.TimeUnit
 import org.dpdns.sylw.videostreamer.R
 import org.dpdns.sylw.videostreamer.StreamConfig
+import org.dpdns.sylw.videostreamer.expectedStreamingScheme
+import org.dpdns.sylw.videostreamer.isValidStreamingUrl
 import org.dpdns.sylw.videostreamer.streaming.StreamManager
 import org.dpdns.sylw.videostreamer.streaming.StreamingConfig
-import org.dpdns.sylw.videostreamer.streaming.VideoFrameRateDiagnostics
+import org.dpdns.sylw.videostreamer.streaming.StreamingLatencyDiagnostics
+import org.dpdns.sylw.videostreamer.encoding.VideoFrameRateDiagnostics
 import kotlin.math.roundToInt
 
 /**
@@ -97,6 +100,7 @@ class CameraStreamManager(private val context: Context) {
     var onError: ((String) -> Unit)? = null
     var onInfo: ((String) -> Unit)? = null
     var onVideoFrameRateMeasured: ((VideoFrameRateDiagnostics) -> Unit)? = null
+    var onLatencyMeasured: ((StreamingLatencyDiagnostics) -> Unit)? = null
 
     // 防止递归调用
     private var isHandlingError = false
@@ -1067,13 +1071,13 @@ class CameraStreamManager(private val context: Context) {
     /**
      * 开始推流
      *
-     * 1. 调用 protocol.startCameraMode，由协议层创建编码器并暴露输入 Surface
+     * 1. 由通用推流会话创建编码器并暴露输入 Surface
      * 2. 协议层通过 onSurfaceReady 回调把 Surface 交还本管理器
      * 3. 本管理器使用该 Surface 打开摄像头，启动 CaptureSession
      */
     @SuppressLint("MissingPermission")
-    suspend fun startStreaming(rtmpUrl: String, cameraConfig: CameraConfig, activity: Activity) {
-        Log.d(TAG, "Starting RTMP streaming to: $rtmpUrl")
+    suspend fun startStreaming(streamUrl: String, cameraConfig: CameraConfig, activity: Activity) {
+        Log.d(TAG, "Starting camera streaming to: $streamUrl")
 
         // 重置降级标记，每次新推流都允许先尝试高速模式
         hasAttemptedFallback = false
@@ -1082,14 +1086,14 @@ class CameraStreamManager(private val context: Context) {
         fun onSurfaceReady(surface: Surface) {
             openCamera(cameraConfig, surface)
         }
-        streamManager = StreamManager(activity, {
+        streamManager = StreamManager({
             onSurfaceReady(it)
         }, StreamingConfig(
             width = cameraConfig.width,
             height = cameraConfig.height,
             videoBitrate = StreamConfig.getVideoBitrate()!!,
             frameRate = cameraConfig.frameRate,
-            iFrameInterval = 5,
+            iFrameInterval = 1,
             videoMode = StreamConfig.getRateMode()!!,
             videoQuality = StreamConfig.getCqQuality()!!,
             useAudio = false,       // 摄像头模式不采集音频
@@ -1123,6 +1127,10 @@ class CameraStreamManager(private val context: Context) {
             onVideoFrameRateMeasured = { diagnostics ->
                 this@CameraStreamManager.onVideoFrameRateMeasured?.invoke(diagnostics)
             }
+
+            onLatencyMeasured = { diagnostics ->
+                this@CameraStreamManager.onLatencyMeasured?.invoke(diagnostics)
+            }
         }
         if (streamManager == null) {
             Log.e(TAG, "Protocol not initialized")
@@ -1130,15 +1138,16 @@ class CameraStreamManager(private val context: Context) {
             return
         }
 
-        if (!rtmpUrl.startsWith("rtmp://")) {
-            onError?.invoke("无效的 RTMP 地址：$rtmpUrl")
+        val selectedProtocol = StreamConfig.getStreamingProtocol() ?: "RTMP"
+        if (!isValidStreamingUrl(streamUrl, selectedProtocol)) {
+            onError?.invoke("无效的推流地址：$streamUrl（需要 ${expectedStreamingScheme(selectedProtocol)}://）")
             return
         }
 
         try {
-            streamManager!!.init(StreamConfig.getStreamingProtocol()!!)
+            streamManager!!.init(selectedProtocol)
 
-            streamManager!!.startStreaming(rtmpUrl)
+            streamManager!!.startStreaming(streamUrl)
             Log.d(TAG, "Camera streaming requested via protocol")
 
         } catch (e: Exception) {
@@ -1266,6 +1275,7 @@ class CameraStreamManager(private val context: Context) {
         onError = null
         onInfo = null
         onVideoFrameRateMeasured = null
+        onLatencyMeasured = null
 
         Log.d(TAG, "CameraStreamManager released")
     }

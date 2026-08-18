@@ -10,6 +10,7 @@ activityCompose = "1.12.4"
 composeBom = "2024.09.00"
 datastorePreferences = "1.1.3"
 cameraCore = "1.6.1"
+kwik = "0.10.9"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -32,6 +33,7 @@ androidx-camera-core = { group = "androidx.camera", name = "camera-core", versio
 androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraCore" }
 androidx-camera-lifecycle = { group = "androidx.camera", name = "camera-lifecycle", version.ref = "cameraCore" }
 androidx-camera-view = { group = "androidx.camera", name = "camera-view", version.ref = "cameraCore" }
+kwik = { module = "tech.kwik:kwik", version.ref = "kwik" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
