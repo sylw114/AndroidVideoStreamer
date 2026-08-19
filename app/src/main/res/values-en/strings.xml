@@ -87,4 +87,6 @@
     <string name="notification_screen_streaming">Screen streaming</string>
     <string name="notification_streaming_detail">Streaming: %1$dx%2$d, DPI=%3$d</string>
     <string name="notification_channel_screen_capture">Screen Capture</string>
+    <string name="notification_encoder_error_title">Encoder error</string>
+    <string name="notification_channel_encoder_errors">Encoder errors</string>
 </resources>

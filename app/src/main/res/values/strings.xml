@@ -87,4 +87,6 @@
     <string name="notification_screen_streaming">录屏直播中</string>
     <string name="notification_streaming_detail">正在推流：%1$dx%2$d, DPI=%3$d</string>
     <string name="notification_channel_screen_capture">屏幕捕获</string>
+    <string name="notification_encoder_error_title">编码器错误</string>
+    <string name="notification_channel_encoder_errors">编码器错误</string>
 </resources>

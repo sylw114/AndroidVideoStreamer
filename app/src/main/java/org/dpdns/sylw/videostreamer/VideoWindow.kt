@@ -225,6 +225,7 @@ fun VideoWindow(modifier: Modifier = Modifier) {
 
                 onError = { error ->
 //                android.util.Log.e("VideoWindow", "Stream error: $error")
+                    EncoderErrorNotifier.notifyIfEncoderError(context, error)
                     // 🔥 确保在主线程显示 Toast，避免后台线程崩溃
                     isPending = false
                     kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.Main) {

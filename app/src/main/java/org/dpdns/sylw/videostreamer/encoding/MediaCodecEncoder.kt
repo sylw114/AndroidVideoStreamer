@@ -104,6 +104,10 @@ class MediaCodecEncoder(
     // 音视频共用单调时钟；PCM 缓存保存尚未提交帧的真实采集起点。
     private var mediaTimelineOriginNs = 0L
     private var audioPendingCaptureTimeNs = -1L
+
+    /** 视频输出端失败时必须穿透到编码循环，不能继续伪装成正常推流。 */
+    private class VideoOutputException(cause: Throwable) :
+        IllegalStateException("视频帧发送失败：${cause.message}", cause)
     
     override fun prepare() {
         check(!isPrepared && !isEncoding) { "编码器已经准备或启动" }
@@ -642,7 +646,7 @@ class MediaCodecEncoder(
                                                         
                                 // 立即发送视频解码配置
                                 if (!spsPpsSent) {
-                                    output.sendVideoConfig(VideoCodecConfig(avccConfig))
+                                    sendVideoConfig(VideoCodecConfig(avccConfig))
                                     spsPpsSent = true
 //                                    Log.d(TAG, "✓✓✓ Video Sequence Header sent successfully from INFO_OUTPUT_FORMAT_CHANGED! ✓✓✓")
                                 }
@@ -665,6 +669,11 @@ class MediaCodecEncoder(
                             try {
                                 processVideoData(chunk, videoBufferInfo!!)
                                 consecutiveErrors = 0
+                            } catch (e: VideoOutputException) {
+                                if (isEncoding) {
+                                    handleEncoderFailure(e.message ?: "视频帧发送失败")
+                                }
+                                break
                             } catch (e: Exception) {
                                 consecutiveErrors++
 //                                Log.e(TAG, "Error processing video data ($consecutiveErrors/$maxConsecutiveErrors): ${e.message}")
@@ -732,7 +741,7 @@ class MediaCodecEncoder(
                     val avccConfig = cachedAVCCConfig
                     if (avccConfig != null) {
 //                        Log.d(TAG, "Using cached AVCC config from csd-0/csd-1, size=${avccConfig.size}")
-                        output.sendVideoConfig(VideoCodecConfig(avccConfig))
+                        sendVideoConfig(VideoCodecConfig(avccConfig))
                         spsPpsSent = true
 //                        Log.d(TAG, "SPS/PPS sent successfully using cached AVCC config!")
                     } else {
@@ -786,7 +795,7 @@ class MediaCodecEncoder(
                                 val sps = nalUnits.first()
                                 val pps = nalUnits.last()
                                 val avccFromAnnexB = H264Avcc.mergeParameterSets(sps, pps)
-                                output.sendVideoConfig(VideoCodecConfig(avccFromAnnexB))
+                                sendVideoConfig(VideoCodecConfig(avccFromAnnexB))
                                 spsPpsSent = true
 //                                Log.d(TAG, "SPS/PPS extracted from AnnexB and sent!")
                             } else {
@@ -888,13 +897,17 @@ class MediaCodecEncoder(
                 // 关键帧可靠发送，接收端也会再次按 NAL 类型校验回放边界。
                 val isKeyFrame = codecMarkedKeyFrame || H264Avcc.containsIdr(frameData)
                 
-                output.sendVideoFrame(EncodedVideoFrame(
-                    data = frameData,
-                    presentationTimeUs = presentationTimeUs,
-                    isKeyFrame = isKeyFrame,
-                    captureTimeNs = captureTimeNs,
-                    encodedTimeNs = outputTimeNs
-                ))
+                try {
+                    output.sendVideoFrame(EncodedVideoFrame(
+                        data = frameData,
+                        presentationTimeUs = presentationTimeUs,
+                        isKeyFrame = isKeyFrame,
+                        captureTimeNs = captureTimeNs,
+                        encodedTimeNs = outputTimeNs
+                    ))
+                } catch (e: Exception) {
+                    throw VideoOutputException(e)
+                }
                 
                 // 🔥 性能优化：移除高频诊断日志，仅在关键帧打印
                 if (isKeyFrame) {
@@ -902,12 +915,21 @@ class MediaCodecEncoder(
                 } else {
                     // Log.v(TAG, "Sent video frame, size=${frameData.size}, pts=${presentationTimeMs}ms")
                 }
-            } catch (e: Exception) {
-//                Log.e(TAG, "Failed to send video frame: ${e.message}")
+            } catch (e: VideoOutputException) {
+                throw e
             }
             
         } catch (e: Exception) {
+            if (e is VideoOutputException) throw e
 //            Log.e(TAG, "Error processing video data", e)
+        }
+    }
+
+    private fun sendVideoConfig(config: VideoCodecConfig) {
+        try {
+            output.sendVideoConfig(config)
+        } catch (e: Exception) {
+            throw VideoOutputException(e)
         }
     }
     

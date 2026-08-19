@@ -178,6 +178,7 @@ fun CameraWindow(modifier: Modifier = Modifier) {
             }
 
             onError = { error ->
+                EncoderErrorNotifier.notifyIfEncoderError(context, error)
                 scope.launch {
                     isPending = false
                     errorMessage = error
