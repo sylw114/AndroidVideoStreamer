@@ -1,0 +1,7 @@
+[submodule "third_party/tongsuo"]
+	path = third_party/tongsuo
+	url = https://github.com/Tongsuo-Project/Tongsuo.git
+	branch = 8.3-stable
+[submodule "third_party/xquic"]
+	path = third_party/xquic
+	url = https://github.com/alibaba/xquic.git

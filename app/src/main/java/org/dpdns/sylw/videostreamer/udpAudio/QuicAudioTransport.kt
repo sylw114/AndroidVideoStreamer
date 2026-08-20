@@ -1,13 +1,11 @@
 package org.dpdns.sylw.videostreamer.udpAudio
 
-import tech.kwik.core.QuicClientConnection
+import org.dpdns.sylw.videostreamer.quic.XquicConnection
 import java.io.DataInputStream
 import java.io.DataOutputStream
-import java.net.URI
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
-import java.time.Duration
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
@@ -41,7 +39,7 @@ internal class QuicAudioTransport : LowLatencyAudioTransport {
 
     private var endpoint: AudioEndpoint? = null
     private var callbacks: AudioTransportCallbacks? = null
-    private var connection: QuicClientConnection? = null
+    private var connection: XquicConnection? = null
     private var controlInput: DataInputStream? = null
     private var controlOutput: DataOutputStream? = null
     private var controlThread: Thread? = null
@@ -56,16 +54,7 @@ internal class QuicAudioTransport : LowLatencyAudioTransport {
         this.endpoint = endpoint
         this.callbacks = callbacks
 
-        val nextConnection = QuicClientConnection.newBuilder()
-            .uri(URI("https", null, endpoint.host, endpoint.mediaPort, "/", null, null))
-            .applicationProtocol(ALPN)
-            .noServerCertificateCheck()
-            .connectTimeout(Duration.ofSeconds(5))
-            .maxIdleTimeout(Duration.ofSeconds(5))
-            .maxOpenPeerInitiatedBidirectionalStreams(2)
-            .maxOpenPeerInitiatedUnidirectionalStreams(2)
-            .build()
-        nextConnection.connect()
+        val nextConnection = XquicConnection.connect(endpoint.host, endpoint.mediaPort, ALPN)
 
         val control = nextConnection.createStream(true)
         val input = DataInputStream(control.inputStream)

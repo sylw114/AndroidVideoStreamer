@@ -27,6 +27,30 @@ VideoStreamer 是一个专为 Android 设备设计的视频流媒体应用，旨
 - Android API 级别 29 或更高
 - 一个 RTMP 流服务器
 
+### 原生 QUIC 构建
+
+QUIC 传输使用 [Alibaba XQUIC](https://github.com/alibaba/xquic) v1.9.5，TLS 后端固定为
+[Tongsuo（铜锁，原 BabaSSL）](https://github.com/Tongsuo-Project/Tongsuo) 8.3-stable。
+XQUIC 与 Tongsuo 都以 Git 子模块固定到已验证提交；Android 包只生成 arm64-v8a，最低 API 为 29。
+
+首次构建或更新子模块后执行：
+
+```bash
+git submodule update --init --recursive
+./scripts/build-tongsuo-android.sh
+```
+
+Windows 请在 Git Bash 中运行上面的 Tongsuo 脚本，并准备 Android NDK
+`27.2.12479018`、CMake `3.22.1`、Perl 与 Make。脚本默认从 `local.properties` 读取
+Android SDK 路径，将静态库放到忽略提交的 `third_party/build/`。随后在 PowerShell 或终端构建应用：
+
+```powershell
+.\gradlew.bat assembleDebug
+```
+
+如需指定环境，可设置 `ANDROID_NDK_HOME`、`ANDROID_API` 或 `ANDROID_ABIS`。应用层的
+ALPN、控制消息、流方向和媒体封包保持原 LiveSuite 协议不变，因此无需修改服务端。
+
 ### 使用指南
 
 1. 启动应用。
@@ -65,6 +89,8 @@ nms.on('donePublish', (sessions) => {
 
 ## 声明
 本项目主要由AI编写，代码质量可能存在问题 ~~250 warnings~~ ，如有大佬发现问题，请提issue，万分感谢。
+
+第三方原生组件及许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 已知问题
 

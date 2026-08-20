@@ -7,6 +7,7 @@ plugins {
 android {
     namespace = "org.dpdns.sylw.videostreamer"
     compileSdk = 37
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "org.dpdns.sylw.videostreamer"
@@ -16,6 +17,16 @@ android {
         versionName = "2.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters += "arm64-v8a"
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_shared")
+            }
+        }
     }
 
     buildTypes {
@@ -44,6 +55,12 @@ android {
     buildFeatures {
         compose = true
     }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
 }
 
 dependencies {
@@ -61,7 +78,6 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.androidx.foundation)
-    implementation(libs.kwik)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

@@ -11,7 +11,7 @@ import org.dpdns.sylw.videostreamer.streaming.StreamDescription
 import org.dpdns.sylw.videostreamer.streaming.StreamingLatencyDiagnostics
 import org.dpdns.sylw.videostreamer.streaming.StreamingTransport
 import org.dpdns.sylw.videostreamer.streaming.TransportCapabilities
-import tech.kwik.core.QuicClientConnection
+import org.dpdns.sylw.videostreamer.quic.XquicConnection
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
@@ -23,7 +23,6 @@ import java.net.SocketTimeoutException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.SecureRandom
-import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingDeque
@@ -129,7 +128,7 @@ class LiveSuiteLowLatencyTransport(
     private val pendingSync = ConcurrentHashMap<Int, Long>()
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    private var quicConnection: QuicClientConnection? = null
+    private var quicConnection: XquicConnection? = null
     private var controlInput: DataInputStream? = null
     private var controlOutput: DataOutputStream? = null
     private val controlWriteLock = Any()
@@ -173,14 +172,7 @@ class LiveSuiteLowLatencyTransport(
     }
 
     private fun connectQuic() {
-        val connection = QuicClientConnection.newBuilder()
-            .uri(URI("https", null, remoteHost, remotePort, "/", null, null))
-            .applicationProtocol(ALPN)
-            .noServerCertificateCheck()
-            .connectTimeout(Duration.ofSeconds(5))
-            .maxIdleTimeout(Duration.ofSeconds(5))
-            .build()
-        connection.connect()
+        val connection = XquicConnection.connect(remoteHost, remotePort, ALPN)
         val control = connection.createStream(true)
         val input = DataInputStream(control.inputStream)
         val output = DataOutputStream(control.outputStream)

@@ -19,3 +19,5 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+# JNI 通过稳定的类名和方法名绑定 xquic 桥接层。
+-keep class org.dpdns.sylw.videostreamer.quic.XquicNative { *; }

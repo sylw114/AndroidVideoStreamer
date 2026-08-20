@@ -62,6 +62,7 @@ Thumbs.db
 
 # C++ build output
 .cxx
+/third_party/build/
 
 # Kotlin
 .kotlin/
