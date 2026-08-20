@@ -13,8 +13,8 @@ android {
         applicationId = "org.dpdns.sylw.videostreamer"
         minSdk = 29
         targetSdk = 36
-        versionCode = 7
-        versionName = "2.1.0"
+        versionCode = 8
+        versionName = "2.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
